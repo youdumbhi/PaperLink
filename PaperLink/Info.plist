@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>google</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>com.googleusercontent.apps.422462145866-i0kj2r27nui9tnkbqlc7pbgjacvfe3vd</string>
+			</array>
+		</dict>
+	</array>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+	</dict>
+	<key>NSCameraUsageDescription</key>
+	<string>Paperlink uses the camera so you can capture photos for notes.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Paperlink can save exported images to your photo library.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Paperlink uses your photo library so you can import photos into notes.</string>
+</dict>
+</plist>

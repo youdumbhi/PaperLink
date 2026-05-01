@@ -1,0 +1,1116 @@
+import os
+import re
+import json
+import shutil
+import sqlite3
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from typing import Optional, Any, Dict, List, Iterable, Set
+
+from fastapi import FastAPI, File, UploadFile, Form, Depends, HTTPException, Request
+from fastapi.responses import FileResponse
+from fastapi.middleware.cors import CORSMiddleware
+
+import firebase_admin
+from firebase_admin import credentials, auth as fb_auth
+
+
+# =========================
+# Config
+# =========================
+
+APP_NAME = "paperlink"
+APP_VERSION = "1.2"
+
+DB_PATH = os.environ.get("PAPERLINK_DB", "/srv/paperlink/db.sqlite3")
+STORAGE_ROOT = os.environ.get("PAPERLINK_STORAGE", "/srv/paperlink/storage")
+FIREBASE_CRED_JSON = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+MAX_FILE_BYTES = int(os.environ.get("PAPERLINK_MAX_UPLOAD_BYTES", str(30 * 1024 * 1024)))  # 30 MB
+
+
+# =========================
+# Firebase Admin init
+# =========================
+
+def init_firebase() -> None:
+    if not firebase_admin._apps:
+        if not FIREBASE_CRED_JSON or not os.path.exists(FIREBASE_CRED_JSON):
+            raise RuntimeError(
+                "Missing Firebase Admin credentials. "
+                "Set GOOGLE_APPLICATION_CREDENTIALS=/path/to/serviceAccount.json"
+            )
+        cred = credentials.Certificate(FIREBASE_CRED_JSON)
+        firebase_admin.initialize_app(cred)
+
+
+init_firebase()
+
+
+# =========================
+# Time helpers
+# =========================
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def parse_iso(value: Any) -> Optional[datetime]:
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+
+    try:
+        dt = datetime.fromisoformat(raw)
+    except Exception:
+        return None
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def normalize_iso(value: Any, fallback: Optional[str] = None) -> str:
+    dt = parse_iso(value)
+    if dt is None:
+        dt = parse_iso(fallback)
+    if dt is None:
+        dt = datetime.now(timezone.utc)
+    return dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def is_incoming_stale(incoming_iso: str, existing_iso: str) -> bool:
+    incoming_dt = parse_iso(incoming_iso)
+    existing_dt = parse_iso(existing_iso)
+    if incoming_dt is None or existing_dt is None:
+        return False
+    return incoming_dt < existing_dt
+
+
+# =========================
+# DB helpers
+# =========================
+
+def db() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn.row_factory = sqlite3.Row
+
+    # Better write concurrency for multiple clients/devices.
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
+
+
+@contextmanager
+def db_conn(write: bool = False):
+    conn = db()
+    try:
+        if write:
+            conn.execute("BEGIN IMMEDIATE")
+        yield conn
+        if write:
+            conn.commit()
+    except Exception:
+        if write:
+            conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(r["name"] == column for r in rows)
+
+
+def init_db() -> None:
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    os.makedirs(STORAGE_ROOT, exist_ok=True)
+
+    with db_conn(write=True) as conn:
+        cur = conn.cursor()
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS folders (
+                uid TEXT NOT NULL,
+                id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                createdAt TEXT NOT NULL,
+                updatedAt TEXT NOT NULL,
+                parentFolderID TEXT,
+                deletedAt TEXT,
+                mediaRotationQuarterTurns INTEGER NOT NULL DEFAULT 0,
+                readingOrder REAL NOT NULL DEFAULT 0,
+                PRIMARY KEY (uid, id)
+            )
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS notes (
+                uid TEXT NOT NULL,
+                id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                kindRaw TEXT NOT NULL,
+                createdAt TEXT NOT NULL,
+                updatedAt TEXT NOT NULL,
+                pinned INTEGER NOT NULL DEFAULT 0,
+                textBody TEXT,
+                photoFilename TEXT,
+                inkDrawingFilename TEXT,
+                highlightDrawingFilename TEXT,
+                drawingPaperStyleRaw TEXT NOT NULL DEFAULT 'lined',
+                drawingPenWidth REAL NOT NULL DEFAULT 6,
+                drawingMarkerWidth REAL NOT NULL DEFAULT 18,
+                drawingLineSpacing REAL NOT NULL DEFAULT 30,
+                drawingDotSpacing REAL NOT NULL DEFAULT 28,
+                drawingDotSize REAL NOT NULL DEFAULT 2,
+                folderID TEXT,
+                deletedAt TEXT,
+                mediaRotationQuarterTurns INTEGER,
+                readingOrder REAL NOT NULL DEFAULT 0,
+                PRIMARY KEY (uid, id)
+            )
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS uploads (
+                uid TEXT NOT NULL,
+                noteID TEXT NOT NULL,
+                status TEXT NOT NULL,
+                lastUpdated TEXT NOT NULL,
+                PRIMARY KEY (uid, noteID)
+            )
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS purged_entities (
+                uid TEXT NOT NULL,
+                entityType TEXT NOT NULL,
+                id TEXT NOT NULL,
+                purgedAt TEXT NOT NULL,
+                PRIMARY KEY (uid, entityType, id)
+            )
+            """
+        )
+
+        # Helpful indexes for sync and file lookups.
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_folders_uid_updated
+            ON folders(uid, updatedAt)
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_notes_uid_updated
+            ON notes(uid, updatedAt)
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_notes_files_uid
+            ON notes(uid, photoFilename, inkDrawingFilename, highlightDrawingFilename)
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_purged_entities_uid_purged
+            ON purged_entities(uid, purgedAt)
+            """
+        )
+
+        # Lightweight migration fields for stable sync ordering/debugging.
+        if not column_exists(conn, "folders", "serverUpdatedAt"):
+            cur.execute("ALTER TABLE folders ADD COLUMN serverUpdatedAt TEXT NOT NULL DEFAULT ''")
+
+        if not column_exists(conn, "notes", "serverUpdatedAt"):
+            cur.execute("ALTER TABLE notes ADD COLUMN serverUpdatedAt TEXT NOT NULL DEFAULT ''")
+
+        if not column_exists(conn, "folders", "readingOrder"):
+            cur.execute("ALTER TABLE folders ADD COLUMN readingOrder REAL NOT NULL DEFAULT 0")
+
+        if not column_exists(conn, "notes", "readingOrder"):
+            cur.execute("ALTER TABLE notes ADD COLUMN readingOrder REAL NOT NULL DEFAULT 0")
+
+        if not column_exists(conn, "notes", "drawingPaperStyleRaw"):
+            cur.execute("ALTER TABLE notes ADD COLUMN drawingPaperStyleRaw TEXT NOT NULL DEFAULT 'lined'")
+        if not column_exists(conn, "notes", "drawingPenWidth"):
+            cur.execute("ALTER TABLE notes ADD COLUMN drawingPenWidth REAL NOT NULL DEFAULT 6")
+        if not column_exists(conn, "notes", "drawingMarkerWidth"):
+            cur.execute("ALTER TABLE notes ADD COLUMN drawingMarkerWidth REAL NOT NULL DEFAULT 18")
+        if not column_exists(conn, "notes", "drawingLineSpacing"):
+            cur.execute("ALTER TABLE notes ADD COLUMN drawingLineSpacing REAL NOT NULL DEFAULT 30")
+        if not column_exists(conn, "notes", "drawingDotSpacing"):
+            cur.execute("ALTER TABLE notes ADD COLUMN drawingDotSpacing REAL NOT NULL DEFAULT 28")
+        if not column_exists(conn, "notes", "drawingDotSize"):
+            cur.execute("ALTER TABLE notes ADD COLUMN drawingDotSize REAL NOT NULL DEFAULT 2")
+
+        cur.execute(
+            """
+            UPDATE folders
+            SET serverUpdatedAt = COALESCE(NULLIF(serverUpdatedAt, ''), updatedAt)
+            WHERE serverUpdatedAt = ''
+            """
+        )
+
+        cur.execute(
+            """
+            UPDATE folders
+            SET readingOrder = COALESCE(CAST(strftime('%s', createdAt) AS REAL), CAST(rowid AS REAL))
+            WHERE readingOrder = 0
+            """
+        )
+
+        cur.execute(
+            """
+            UPDATE notes
+            SET readingOrder = COALESCE(CAST(strftime('%s', createdAt) AS REAL), CAST(rowid AS REAL))
+            WHERE readingOrder = 0
+            """
+        )
+
+        cur.execute(
+            """
+            UPDATE notes
+            SET drawingPaperStyleRaw = 'lined'
+            WHERE drawingPaperStyleRaw IS NULL OR TRIM(drawingPaperStyleRaw) = ''
+            """
+        )
+        cur.execute(
+            """
+            UPDATE notes
+            SET drawingPenWidth = COALESCE(drawingPenWidth, 6),
+                drawingMarkerWidth = COALESCE(drawingMarkerWidth, 18),
+                drawingLineSpacing = COALESCE(drawingLineSpacing, 30),
+                drawingDotSpacing = COALESCE(drawingDotSpacing, 28),
+                drawingDotSize = COALESCE(drawingDotSize, 2)
+            """
+        )
+
+        cur.execute(
+            """
+            UPDATE notes
+            SET serverUpdatedAt = COALESCE(NULLIF(serverUpdatedAt, ''), updatedAt)
+            WHERE serverUpdatedAt = ''
+            """
+        )
+
+
+init_db()
+
+
+# =========================
+# Auth dependency
+# =========================
+
+def get_uid(request: Request) -> str:
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing Bearer token")
+
+    token = auth_header.replace("Bearer ", "", 1).strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing token")
+
+    try:
+        decoded = fb_auth.verify_id_token(token, check_revoked=False, clock_skew_seconds=60)
+        uid = decoded.get("uid")
+        if not uid:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        return uid
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=f"Invalid token: {str(e)}")
+
+
+# =========================
+# Misc helpers
+# =========================
+
+def safe_filename(name: str) -> str:
+    raw = os.path.basename((name or "").strip())
+    raw = raw.replace("\x00", "")
+    # Keep common safe chars only.
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", raw)
+    return safe[:200]
+
+
+def ensure_note_dir(uid: str, note_id: str) -> str:
+    path = os.path.join(STORAGE_ROOT, uid, note_id)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def to_int_or_none(v: Any) -> Optional[int]:
+    if v is None:
+        return None
+    try:
+        return int(v)
+    except Exception:
+        return None
+
+
+def to_bool(v: Any) -> bool:
+    try:
+        return bool(int(v))
+    except Exception:
+        return bool(v)
+
+
+def stale_conflict(entity: str, entity_id: str, server_updated_at: str) -> HTTPException:
+    return HTTPException(
+        status_code=409,
+        detail={
+            "code": "stale_write",
+            "entity": entity,
+            "id": entity_id,
+            "serverUpdatedAt": server_updated_at,
+        },
+    )
+
+
+def delete_note_storage(uid: str, note_id: str) -> None:
+    path = os.path.join(STORAGE_ROOT, uid, note_id)
+    if os.path.exists(path):
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def collect_folder_subtree_ids(folder_rows: Iterable[sqlite3.Row], root_ids: Iterable[str]) -> Set[str]:
+    roots = {folder_id for folder_id in root_ids if folder_id}
+    if not roots:
+        return set()
+
+    children_by_parent: Dict[Optional[str], List[str]] = {}
+    for row in folder_rows:
+        parent = row["parentFolderID"]
+        children_by_parent.setdefault(parent, []).append(row["id"])
+
+    result = set(roots)
+    queue = list(roots)
+    while queue:
+        next_id = queue.pop(0)
+        for child_id in children_by_parent.get(next_id, []):
+            if child_id not in result:
+                result.add(child_id)
+                queue.append(child_id)
+    return result
+
+
+def storage_usage_bytes(uid: str) -> int:
+    uid_root = os.path.join(STORAGE_ROOT, uid)
+    if not os.path.exists(uid_root):
+        return 0
+
+    total = 0
+    for dirpath, _, filenames in os.walk(uid_root):
+        for filename in filenames:
+            path = os.path.join(dirpath, filename)
+            try:
+                total += os.path.getsize(path)
+            except OSError:
+                continue
+    return total
+
+
+def register_purges(
+    conn: sqlite3.Connection,
+    uid: str,
+    entity_type: str,
+    entity_ids: Iterable[str],
+    purged_at: str,
+) -> None:
+    ids = [entity_id for entity_id in entity_ids if entity_id]
+    if not ids:
+        return
+
+    conn.executemany(
+        """
+        INSERT INTO purged_entities(uid, entityType, id, purgedAt)
+        VALUES(?,?,?,?)
+        ON CONFLICT(uid, entityType, id) DO UPDATE SET
+            purgedAt=excluded.purgedAt
+        """,
+        [(uid, entity_type, entity_id, purged_at) for entity_id in ids],
+    )
+
+
+def reject_if_purged(
+    cur: sqlite3.Cursor,
+    uid: str,
+    entity_type: str,
+    entity_id: str,
+) -> None:
+    purged = cur.execute(
+        """
+        SELECT purgedAt
+        FROM purged_entities
+        WHERE uid=? AND entityType=? AND id=?
+        """,
+        (uid, entity_type, entity_id),
+    ).fetchone()
+
+    if purged:
+        raise stale_conflict(entity_type, entity_id, purged["purgedAt"])
+
+
+async def save_upload(
+    upload: Optional[UploadFile],
+    note_dir: str,
+    preferred_name: Optional[str],
+) -> Optional[str]:
+    if upload is None:
+        return None
+
+    preferred = safe_filename(preferred_name or "")
+    actual = safe_filename(upload.filename or "")
+    fname = preferred or actual or "file.bin"
+
+    out_path = os.path.join(note_dir, fname)
+    tmp_path = out_path + ".tmp"
+
+    content = await upload.read()
+    if len(content) > MAX_FILE_BYTES:
+        raise HTTPException(status_code=413, detail=f"Upload too large: {fname}")
+
+    with open(tmp_path, "wb") as f:
+        f.write(content)
+    os.replace(tmp_path, out_path)
+
+    return fname
+
+
+# =========================
+# FastAPI app
+# =========================
+
+app = FastAPI(title="PaperLink Server", version=APP_VERSION)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.get("/health")
+def health() -> Dict[str, Any]:
+    return {"ok": True, "app": APP_NAME, "version": APP_VERSION, "time": now_iso()}
+
+
+# -------------------------
+# Create/Upsert Folder
+# -------------------------
+@app.post("/v1/folders/upsert")
+async def upsert_folder(
+    payload: str = Form(...),
+    uid: str = Depends(get_uid),
+):
+    try:
+        data = json.loads(payload)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload")
+
+    folder_id = str(data.get("id", "")).strip()
+    if not folder_id:
+        raise HTTPException(status_code=400, detail="Missing folder id")
+
+    incoming_created = normalize_iso(data.get("createdAt"), now_iso())
+    incoming_updated = normalize_iso(data.get("updatedAt"), now_iso())
+    server_time = now_iso()
+
+    with db_conn(write=True) as conn:
+        cur = conn.cursor()
+        reject_if_purged(cur, uid, "folder", folder_id)
+        existing = cur.execute(
+            "SELECT createdAt, updatedAt FROM folders WHERE uid=? AND id=?",
+            (uid, folder_id),
+        ).fetchone()
+
+        if existing and is_incoming_stale(incoming_updated, existing["updatedAt"]):
+            raise stale_conflict("folder", folder_id, existing["updatedAt"])
+
+        final_created = existing["createdAt"] if existing else incoming_created
+
+        cur.execute(
+            """
+            INSERT INTO folders(uid, id, name, createdAt, updatedAt, parentFolderID, deletedAt, mediaRotationQuarterTurns, readingOrder, serverUpdatedAt)
+            VALUES(?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(uid, id) DO UPDATE SET
+                name=excluded.name,
+                createdAt=excluded.createdAt,
+                updatedAt=excluded.updatedAt,
+                parentFolderID=excluded.parentFolderID,
+                deletedAt=excluded.deletedAt,
+                mediaRotationQuarterTurns=excluded.mediaRotationQuarterTurns,
+                readingOrder=excluded.readingOrder,
+                serverUpdatedAt=excluded.serverUpdatedAt
+            """,
+            (
+                uid,
+                folder_id,
+                str(data.get("name") or ""),
+                final_created,
+                incoming_updated,
+                data.get("parentFolderID"),
+                normalize_iso(data.get("deletedAt"), now_iso()) if data.get("deletedAt") else None,
+                int(data.get("mediaRotationQuarterTurns") or 0),
+                float(data.get("readingOrder") or 0),
+                server_time,
+            ),
+        )
+
+    return {"ok": True, "serverUpdatedAt": server_time}
+
+
+# -------------------------
+# Create/Upsert Note + upload files
+# -------------------------
+@app.post("/v1/notes/create")
+async def create_note(
+    payload: str = Form(...),
+    photo: Optional[UploadFile] = File(None),
+    ink: Optional[UploadFile] = File(None),
+    highlight: Optional[UploadFile] = File(None),
+    uid: str = Depends(get_uid),
+):
+    try:
+        data = json.loads(payload)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload")
+
+    note_id = str(data.get("id", "")).strip()
+    if not note_id:
+        raise HTTPException(status_code=400, detail="Missing note id")
+
+    kind = str(data.get("kindRaw", "")).strip()
+    if kind not in ("text", "photo", "drawing"):
+        raise HTTPException(status_code=400, detail="Invalid kindRaw")
+
+    incoming_created = normalize_iso(data.get("createdAt"), now_iso())
+    incoming_updated = normalize_iso(data.get("updatedAt"), now_iso())
+    deleted_at = normalize_iso(data.get("deletedAt"), now_iso()) if data.get("deletedAt") else None
+    pinned_int = 1 if bool(data.get("pinned")) else 0
+    mrot = to_int_or_none(data.get("mediaRotationQuarterTurns"))
+    drawing_paper_style = str(data.get("drawingPaperStyleRaw") or "lined").strip()
+    if drawing_paper_style not in ("lined", "dotGrid", "blank"):
+        drawing_paper_style = "lined"
+    drawing_pen_width = float(data.get("drawingPenWidth") or 6)
+    drawing_marker_width = float(data.get("drawingMarkerWidth") or 18)
+    drawing_line_spacing = float(data.get("drawingLineSpacing") or 30)
+    drawing_dot_spacing = float(data.get("drawingDotSpacing") or 28)
+    drawing_dot_size = float(data.get("drawingDotSize") or 2)
+    server_time = now_iso()
+
+    # 1) Metadata transaction + stale-write protection.
+    with db_conn(write=True) as conn:
+        cur = conn.cursor()
+        reject_if_purged(cur, uid, "note", note_id)
+
+        existing = cur.execute(
+            "SELECT createdAt, updatedAt FROM notes WHERE uid=? AND id=?",
+            (uid, note_id),
+        ).fetchone()
+
+        if existing and is_incoming_stale(incoming_updated, existing["updatedAt"]):
+            raise stale_conflict("note", note_id, existing["updatedAt"])
+
+        final_created = existing["createdAt"] if existing else incoming_created
+
+        cur.execute(
+            """
+            INSERT INTO notes(uid, id, title, kindRaw, createdAt, updatedAt, pinned, textBody,
+                              photoFilename, inkDrawingFilename, highlightDrawingFilename, drawingPaperStyleRaw,
+                              drawingPenWidth, drawingMarkerWidth, drawingLineSpacing, drawingDotSpacing, drawingDotSize,
+                              folderID, deletedAt, mediaRotationQuarterTurns, readingOrder, serverUpdatedAt)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(uid, id) DO UPDATE SET
+                title=excluded.title,
+                kindRaw=excluded.kindRaw,
+                createdAt=excluded.createdAt,
+                updatedAt=excluded.updatedAt,
+                pinned=excluded.pinned,
+                textBody=excluded.textBody,
+                photoFilename=excluded.photoFilename,
+                inkDrawingFilename=excluded.inkDrawingFilename,
+                highlightDrawingFilename=excluded.highlightDrawingFilename,
+                drawingPaperStyleRaw=excluded.drawingPaperStyleRaw,
+                drawingPenWidth=excluded.drawingPenWidth,
+                drawingMarkerWidth=excluded.drawingMarkerWidth,
+                drawingLineSpacing=excluded.drawingLineSpacing,
+                drawingDotSpacing=excluded.drawingDotSpacing,
+                drawingDotSize=excluded.drawingDotSize,
+                folderID=excluded.folderID,
+                deletedAt=excluded.deletedAt,
+                mediaRotationQuarterTurns=excluded.mediaRotationQuarterTurns,
+                readingOrder=excluded.readingOrder,
+                serverUpdatedAt=excluded.serverUpdatedAt
+            """,
+            (
+                uid,
+                note_id,
+                str(data.get("title") or ""),
+                kind,
+                final_created,
+                incoming_updated,
+                pinned_int,
+                data.get("textBody"),
+                data.get("photoFilename"),
+                data.get("inkDrawingFilename"),
+                data.get("highlightDrawingFilename"),
+                drawing_paper_style,
+                drawing_pen_width,
+                drawing_marker_width,
+                drawing_line_spacing,
+                drawing_dot_spacing,
+                drawing_dot_size,
+                data.get("folderID"),
+                deleted_at,
+                mrot,
+                float(data.get("readingOrder") or 0),
+                server_time,
+            ),
+        )
+
+        cur.execute(
+            """
+            INSERT INTO uploads(uid, noteID, status, lastUpdated)
+            VALUES(?,?,?,?)
+            ON CONFLICT(uid, noteID) DO UPDATE SET
+                status=excluded.status,
+                lastUpdated=excluded.lastUpdated
+            """,
+            (uid, note_id, "metadata_saved", now_iso()),
+        )
+
+    # 2) Save uploaded files.
+    note_dir = ensure_note_dir(uid, note_id)
+    try:
+        photo_name = await save_upload(photo, note_dir, data.get("photoFilename"))
+        ink_name = await save_upload(ink, note_dir, data.get("inkDrawingFilename"))
+        hl_name = await save_upload(highlight, note_dir, data.get("highlightDrawingFilename"))
+    except HTTPException:
+        with db_conn(write=True) as conn:
+            conn.execute(
+                "UPDATE uploads SET status=?, lastUpdated=? WHERE uid=? AND noteID=?",
+                ("files_failed", now_iso(), uid, note_id),
+            )
+        raise
+    except Exception as e:
+        with db_conn(write=True) as conn:
+            conn.execute(
+                "UPDATE uploads SET status=?, lastUpdated=? WHERE uid=? AND noteID=?",
+                ("files_failed", now_iso(), uid, note_id),
+            )
+        raise HTTPException(status_code=500, detail=f"Failed writing files: {str(e)}")
+
+    # 3) Persist resulting filenames + final upload status.
+    with db_conn(write=True) as conn:
+        conn.execute(
+            """
+            UPDATE notes
+            SET
+                photoFilename = CASE WHEN ? IS NOT NULL THEN ? ELSE photoFilename END,
+                inkDrawingFilename = CASE WHEN ? IS NOT NULL THEN ? ELSE inkDrawingFilename END,
+                highlightDrawingFilename = CASE WHEN ? IS NOT NULL THEN ? ELSE highlightDrawingFilename END,
+                serverUpdatedAt = ?
+            WHERE uid=? AND id=?
+            """,
+            (
+                photo_name,
+                photo_name,
+                ink_name,
+                ink_name,
+                hl_name,
+                hl_name,
+                now_iso(),
+                uid,
+                note_id,
+            ),
+        )
+
+        conn.execute(
+            "UPDATE uploads SET status=?, lastUpdated=? WHERE uid=? AND noteID=?",
+            ("files_saved", now_iso(), uid, note_id),
+        )
+
+    return {
+        "ok": True,
+        "saved": {"photo": photo_name, "ink": ink_name, "highlight": hl_name},
+        "serverUpdatedAt": now_iso(),
+    }
+
+
+# -------------------------
+# Empty trash permanently
+# -------------------------
+@app.post("/v1/trash/empty")
+def empty_trash(uid: str = Depends(get_uid)):
+    purged_at = now_iso()
+    purged_note_ids: List[str] = []
+    purged_folder_ids: List[str] = []
+
+    with db_conn(write=True) as conn:
+        folder_rows = conn.execute(
+            "SELECT id, parentFolderID, deletedAt FROM folders WHERE uid=?",
+            (uid,),
+        ).fetchall()
+
+        deleted_folder_ids = [row["id"] for row in folder_rows if row["deletedAt"] is not None]
+        purged_folder_ids = sorted(collect_folder_subtree_ids(folder_rows, deleted_folder_ids))
+
+        note_rows = conn.execute(
+            "SELECT id, folderID, deletedAt FROM notes WHERE uid=?",
+            (uid,),
+        ).fetchall()
+
+        purged_folder_id_set = set(purged_folder_ids)
+        purged_note_ids = sorted(
+            {
+                row["id"]
+                for row in note_rows
+                if row["deletedAt"] is not None
+                or (row["folderID"] in purged_folder_id_set if row["folderID"] else False)
+            }
+        )
+
+        register_purges(conn, uid, "folder", purged_folder_ids, purged_at)
+        register_purges(conn, uid, "note", purged_note_ids, purged_at)
+
+        conn.executemany(
+            "DELETE FROM uploads WHERE uid=? AND noteID=?",
+            [(uid, note_id) for note_id in purged_note_ids],
+        )
+        conn.executemany(
+            "DELETE FROM notes WHERE uid=? AND id=?",
+            [(uid, note_id) for note_id in purged_note_ids],
+        )
+        conn.executemany(
+            "DELETE FROM folders WHERE uid=? AND id=?",
+            [(uid, folder_id) for folder_id in purged_folder_ids],
+        )
+
+    for note_id in purged_note_ids:
+        delete_note_storage(uid, note_id)
+
+    return {
+        "ok": True,
+        "purged": {"folders": len(purged_folder_ids), "notes": len(purged_note_ids)},
+        "serverUpdatedAt": purged_at,
+    }
+
+
+# -------------------------
+# Download a note file (note-id based)
+# -------------------------
+@app.get("/v1/notes/{note_id}/files/{filename}")
+def get_note_file(note_id: str, filename: str, uid: str = Depends(get_uid)):
+    clean_name = safe_filename(filename)
+    path = os.path.join(STORAGE_ROOT, uid, note_id, clean_name)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(path)
+
+
+# -------------------------
+# Download file by filename (client calls this)
+# -------------------------
+@app.get("/v1/files/get")
+def get_file_by_filename(filename: str, uid: str = Depends(get_uid)):
+    clean_name = safe_filename(filename)
+    if not clean_name:
+        raise HTTPException(status_code=400, detail="Missing filename")
+
+    with db_conn(write=False) as conn:
+        rows = conn.execute(
+            """
+            SELECT id
+            FROM notes
+            WHERE uid=?
+              AND (photoFilename=? OR inkDrawingFilename=? OR highlightDrawingFilename=?)
+            ORDER BY updatedAt DESC
+            LIMIT 50
+            """,
+            (uid, clean_name, clean_name, clean_name),
+        ).fetchall()
+
+    for row in rows:
+        note_id = row["id"]
+        path = os.path.join(STORAGE_ROOT, uid, note_id, clean_name)
+        if os.path.exists(path):
+            return FileResponse(path)
+
+    raise HTTPException(status_code=404, detail="File not found")
+
+
+# -------------------------
+# Full sync for iOS (compatible with existing FullSyncPayload)
+# -------------------------
+@app.get("/v1/stats/usage")
+def usage_stats(uid: str = Depends(get_uid)):
+    with db_conn(write=False) as conn:
+        count_rows = conn.execute(
+            """
+            SELECT kindRaw, COUNT(*) AS count
+            FROM notes
+            WHERE uid=? AND deletedAt IS NULL
+            GROUP BY kindRaw
+            """,
+            (uid,),
+        ).fetchall()
+
+    counts = {"text": 0, "drawing": 0, "photo": 0}
+    for row in count_rows:
+        kind = (row["kindRaw"] or "").strip().lower()
+        if kind in counts:
+            counts[kind] = int(row["count"] or 0)
+
+    all_count = counts["text"] + counts["drawing"] + counts["photo"]
+    return {
+        "storageBytes": int(storage_usage_bytes(uid)),
+        "noteCounts": {
+            "text": counts["text"],
+            "drawing": counts["drawing"],
+            "photo": counts["photo"],
+            "all": all_count,
+        },
+    }
+
+
+# -------------------------
+# Full sync for iOS (compatible with existing FullSyncPayload)
+# -------------------------
+@app.get("/v1/sync/full")
+def sync_full(uid: str = Depends(get_uid)):
+    with db_conn(write=False) as conn:
+        folder_rows = conn.execute(
+            "SELECT * FROM folders WHERE uid=? ORDER BY updatedAt ASC, id ASC",
+            (uid,),
+        ).fetchall()
+
+        note_rows = conn.execute(
+            "SELECT * FROM notes WHERE uid=? ORDER BY updatedAt ASC, id ASC",
+            (uid,),
+        ).fetchall()
+
+        purge_rows = conn.execute(
+            """
+            SELECT entityType, id, purgedAt
+            FROM purged_entities
+            WHERE uid=?
+            ORDER BY purgedAt ASC, id ASC
+            """,
+            (uid,),
+        ).fetchall()
+
+    folders: List[Dict[str, Any]] = []
+    for r in folder_rows:
+        folders.append(
+            {
+                "id": r["id"],
+                "name": r["name"],
+                "parentFolderID": r["parentFolderID"],
+                "createdAt": r["createdAt"],
+                "updatedAt": r["updatedAt"],
+                "deletedAt": r["deletedAt"],
+                "mediaRotationQuarterTurns": int(r["mediaRotationQuarterTurns"] or 0),
+                "readingOrder": float(r["readingOrder"] or 0),
+                "serverUpdatedAt": r["serverUpdatedAt"],
+            }
+        )
+
+    notes: List[Dict[str, Any]] = []
+    for r in note_rows:
+        notes.append(
+            {
+                "id": r["id"],
+                "title": r["title"],
+                "kindRaw": r["kindRaw"],
+                "folderID": r["folderID"],
+                "createdAt": r["createdAt"],
+                "updatedAt": r["updatedAt"],
+                "deletedAt": r["deletedAt"],
+                "pinned": to_bool(r["pinned"]),
+                "mediaRotationQuarterTurns": (
+                    int(r["mediaRotationQuarterTurns"])
+                    if r["mediaRotationQuarterTurns"] is not None
+                    else None
+                ),
+                "textBody": r["textBody"],
+                "photoFilename": r["photoFilename"],
+                "inkDrawingFilename": r["inkDrawingFilename"],
+                "highlightDrawingFilename": r["highlightDrawingFilename"],
+                "drawingPaperStyleRaw": r["drawingPaperStyleRaw"],
+                "drawingPenWidth": float(r["drawingPenWidth"] or 6),
+                "drawingMarkerWidth": float(r["drawingMarkerWidth"] or 18),
+                "drawingLineSpacing": float(r["drawingLineSpacing"] or 30),
+                "drawingDotSpacing": float(r["drawingDotSpacing"] or 28),
+                "drawingDotSize": float(r["drawingDotSize"] or 2),
+                "readingOrder": float(r["readingOrder"] or 0),
+                "serverUpdatedAt": r["serverUpdatedAt"],
+            }
+        )
+
+    purged_folders = [
+        {"id": r["id"], "purgedAt": r["purgedAt"]}
+        for r in purge_rows
+        if r["entityType"] == "folder"
+    ]
+    purged_notes = [
+        {"id": r["id"], "purgedAt": r["purgedAt"]}
+        for r in purge_rows
+        if r["entityType"] == "note"
+    ]
+
+    return {
+        "folders": folders,
+        "notes": notes,
+        "purgedFolders": purged_folders,
+        "purgedNotes": purged_notes,
+        "serverTime": now_iso(),
+    }
+
+
+# -------------------------
+# Incremental pull (optional)
+# -------------------------
+@app.get("/v1/sync/pull")
+def sync_pull(since: Optional[str] = None, uid: str = Depends(get_uid)):
+    if since:
+        since_dt = parse_iso(since)
+        if since_dt is None:
+            raise HTTPException(status_code=400, detail="Invalid 'since' timestamp")
+        normalized_since = since_dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        with db_conn(write=False) as conn:
+            folder_rows = conn.execute(
+                """
+                SELECT * FROM folders
+                WHERE uid=? AND serverUpdatedAt > ?
+                ORDER BY serverUpdatedAt ASC, id ASC
+                """,
+                (uid, normalized_since),
+            ).fetchall()
+
+            note_rows = conn.execute(
+                """
+                SELECT * FROM notes
+                WHERE uid=? AND serverUpdatedAt > ?
+                ORDER BY serverUpdatedAt ASC, id ASC
+                """,
+                (uid, normalized_since),
+            ).fetchall()
+
+            purge_rows = conn.execute(
+                """
+                SELECT entityType, id, purgedAt
+                FROM purged_entities
+                WHERE uid=? AND purgedAt > ?
+                ORDER BY purgedAt ASC, id ASC
+                """,
+                (uid, normalized_since),
+            ).fetchall()
+    else:
+        with db_conn(write=False) as conn:
+            folder_rows = conn.execute(
+                "SELECT * FROM folders WHERE uid=? ORDER BY serverUpdatedAt ASC, id ASC",
+                (uid,),
+            ).fetchall()
+
+            note_rows = conn.execute(
+                "SELECT * FROM notes WHERE uid=? ORDER BY serverUpdatedAt ASC, id ASC",
+                (uid,),
+            ).fetchall()
+
+            purge_rows = conn.execute(
+                """
+                SELECT entityType, id, purgedAt
+                FROM purged_entities
+                WHERE uid=?
+                ORDER BY purgedAt ASC, id ASC
+                """,
+                (uid,),
+            ).fetchall()
+
+    folders: List[Dict[str, Any]] = []
+    for r in folder_rows:
+        folders.append(
+            {
+                "id": r["id"],
+                "name": r["name"],
+                "parentFolderID": r["parentFolderID"],
+                "createdAt": r["createdAt"],
+                "updatedAt": r["updatedAt"],
+                "deletedAt": r["deletedAt"],
+                "mediaRotationQuarterTurns": int(r["mediaRotationQuarterTurns"] or 0),
+                "readingOrder": float(r["readingOrder"] or 0),
+                "serverUpdatedAt": r["serverUpdatedAt"],
+            }
+        )
+
+    notes: List[Dict[str, Any]] = []
+    for r in note_rows:
+        notes.append(
+            {
+                "id": r["id"],
+                "title": r["title"],
+                "kindRaw": r["kindRaw"],
+                "folderID": r["folderID"],
+                "createdAt": r["createdAt"],
+                "updatedAt": r["updatedAt"],
+                "deletedAt": r["deletedAt"],
+                "pinned": to_bool(r["pinned"]),
+                "mediaRotationQuarterTurns": (
+                    int(r["mediaRotationQuarterTurns"])
+                    if r["mediaRotationQuarterTurns"] is not None
+                    else None
+                ),
+                "textBody": r["textBody"],
+                "photoFilename": r["photoFilename"],
+                "inkDrawingFilename": r["inkDrawingFilename"],
+                "highlightDrawingFilename": r["highlightDrawingFilename"],
+                "drawingPaperStyleRaw": r["drawingPaperStyleRaw"],
+                "drawingPenWidth": float(r["drawingPenWidth"] or 6),
+                "drawingMarkerWidth": float(r["drawingMarkerWidth"] or 18),
+                "drawingLineSpacing": float(r["drawingLineSpacing"] or 30),
+                "drawingDotSpacing": float(r["drawingDotSpacing"] or 28),
+                "drawingDotSize": float(r["drawingDotSize"] or 2),
+                "readingOrder": float(r["readingOrder"] or 0),
+                "serverUpdatedAt": r["serverUpdatedAt"],
+            }
+        )
+
+    purged_folders = [
+        {"id": r["id"], "purgedAt": r["purgedAt"]}
+        for r in purge_rows
+        if r["entityType"] == "folder"
+    ]
+    purged_notes = [
+        {"id": r["id"], "purgedAt": r["purgedAt"]}
+        for r in purge_rows
+        if r["entityType"] == "note"
+    ]
+
+    return {
+        "folders": folders,
+        "notes": notes,
+        "purgedFolders": purged_folders,
+        "purgedNotes": purged_notes,
+        "serverTime": now_iso(),
+    }
