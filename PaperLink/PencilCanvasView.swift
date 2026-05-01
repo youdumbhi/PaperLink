@@ -165,7 +165,7 @@ struct PencilCanvasView: UIViewRepresentable {
         container.canvasView.maximumZoomScale = isInfiniteCanvas ? 6.0 : 1.0
         container.canvasView.drawingGestureRecognizer.isEnabled = !isReadOnly
         // Keep drawing responsive: one contact draws, two fingers pan/zoom.
-        // In pencil-only mode, a one-touch pan recognizer can steal Pencil input.
+        // In read-only mode, one-finger panning makes iPhone viewing usable.
         container.canvasView.panGestureRecognizer.minimumNumberOfTouches = isReadOnly ? 1 : 2
         container.canvasView.panGestureRecognizer.maximumNumberOfTouches = 2
         container.updateAllowedTouchTypes(
@@ -238,7 +238,15 @@ final class PLCanvasContainerView: UIView {
 
     var canvasScaleMultiplier: CGFloat = 5.0
     var minimumCanvasSize: CGSize = CGSize(width: 1800, height: 1800)
-    var isReadOnly: Bool = false
+    var isReadOnly: Bool = false {
+        didSet {
+            if oldValue != isReadOnly {
+                hasAppliedInitialZoom = false
+                hasAppliedInitialViewportFocus = false
+                setNeedsLayout()
+            }
+        }
+    }
     var isInfiniteCanvas: Bool = false {
         didSet {
             if oldValue != isInfiniteCanvas {
@@ -319,17 +327,20 @@ final class PLCanvasContainerView: UIView {
         guard let next = try? PKDrawing(data: data) else { return }
         if next.dataRepresentation() != canvasView.drawing.dataRepresentation() {
             canvasView.drawing = next
-            if isInfiniteCanvas, !hasAppliedInitialViewportFocus {
-                focusViewportOnDrawingIfAvailable(animated: false)
-                hasAppliedInitialViewportFocus = true
+            if isInfiniteCanvas {
+                setNeedsLayout()
+                if !hasAppliedInitialViewportFocus {
+                    focusViewportOnDrawingIfAvailable(animated: false)
+                    hasAppliedInitialViewportFocus = true
+                }
             }
         }
     }
 
     func resetViewport(animated: Bool) {
         guard isInfiniteCanvas else { return }
-        let fillZoom = minimumZoomScaleThatFillsBounds(fallback: 0.2)
-        canvasView.setZoomScale(fillZoom, animated: animated)
+        let targetZoom = initialViewportZoomScale()
+        canvasView.setZoomScale(targetZoom, animated: animated)
         DispatchQueue.main.async {
             self.focusViewportOnDrawingIfAvailable(animated: animated)
             self.refreshOverlay()
@@ -365,13 +376,13 @@ final class PLCanvasContainerView: UIView {
         if abs(canvasView.minimumZoomScale - fillZoom) > 0.001 {
             canvasView.minimumZoomScale = fillZoom
         }
-        let shouldResnapToFill =
+        let shouldResnapToInitialViewport =
             !hasAppliedInitialZoom ||
             (previousContentSize != targetSize && canvasView.zoomScale <= canvasView.minimumZoomScale + 0.02) ||
             (oldSize != .zero && oldSize != bounds.size && canvasView.zoomScale <= canvasView.minimumZoomScale + 0.02)
 
-        if shouldResnapToFill {
-            canvasView.setZoomScale(fillZoom, animated: false)
+        if shouldResnapToInitialViewport {
+            canvasView.setZoomScale(initialViewportZoomScale(), animated: false)
             hasAppliedInitialZoom = true
         } else if canvasView.zoomScale < fillZoom {
             canvasView.setZoomScale(fillZoom, animated: false)
@@ -391,9 +402,20 @@ final class PLCanvasContainerView: UIView {
             width: max(bounds.width, screenSize.width),
             height: max(bounds.height, screenSize.height)
         )
+        let drawingBounds = canvasView.drawing.bounds
+        let drawingPadding: CGFloat = isReadOnly ? 420 : 240
+        let requiredDrawingSize: CGSize
+        if drawingBounds.isEmpty {
+            requiredDrawingSize = .zero
+        } else {
+            requiredDrawingSize = CGSize(
+                width: max(drawingBounds.maxX + drawingPadding, drawingBounds.width + drawingPadding * 2),
+                height: max(drawingBounds.maxY + drawingPadding, drawingBounds.height + drawingPadding * 2)
+            )
+        }
         return CGSize(
-            width: max(seed.width * canvasScaleMultiplier, minimumCanvasSize.width),
-            height: max(seed.height * canvasScaleMultiplier, minimumCanvasSize.height)
+            width: max(seed.width * canvasScaleMultiplier, minimumCanvasSize.width, requiredDrawingSize.width),
+            height: max(seed.height * canvasScaleMultiplier, minimumCanvasSize.height, requiredDrawingSize.height)
         )
     }
 
@@ -407,13 +429,30 @@ final class PLCanvasContainerView: UIView {
         return max(fallback, fillWidth, fillHeight)
     }
 
+    private func initialViewportZoomScale() -> CGFloat {
+        let fillZoom = minimumZoomScaleThatFillsBounds(fallback: 0.2)
+        guard isReadOnly else { return fillZoom }
+
+        let drawingBounds = canvasView.drawing.bounds
+        guard !drawingBounds.isEmpty, bounds.width > 1, bounds.height > 1 else {
+            return fillZoom
+        }
+
+        let padded = drawingBounds.insetBy(dx: -160, dy: -160)
+        let fitWidth = bounds.width / max(padded.width, 1)
+        let fitHeight = bounds.height / max(padded.height, 1)
+        let fitZoom = min(fitWidth, fitHeight)
+        return min(max(fitZoom, fillZoom), canvasView.maximumZoomScale)
+    }
+
     private func focusViewportOnDrawingIfAvailable(animated: Bool) {
         let drawingBounds = canvasView.drawing.bounds
         let center: CGPoint
         if drawingBounds.isEmpty {
             center = CGPoint(x: canvasView.contentSize.width * 0.5, y: canvasView.contentSize.height * 0.5)
         } else {
-            let padded = drawingBounds.insetBy(dx: -120, dy: -120)
+            let padding: CGFloat = isReadOnly ? 160 : 120
+            let padded = drawingBounds.insetBy(dx: -padding, dy: -padding)
             center = CGPoint(x: padded.midX, y: padded.midY)
         }
         canvasView.setContentOffset(clampedOffset(forDocumentCenter: center), animated: animated)
