@@ -1150,14 +1150,16 @@ struct NoteEditorScreen: View {
                 .padding(.horizontal, 12)
                 .frame(height: 50)
                 .frame(minWidth: 180, maxWidth: 340)
-                .background(p.railButton)
+                .background(.ultraThinMaterial)
+            .background(Color.white.opacity(0.48))
                 .clipShape(RoundedRectangle(cornerRadius: 16))
                 .overlay(
                     RoundedRectangle(cornerRadius: 16)
                         .stroke(p.outline, lineWidth: 1)
                 )
-                .foregroundStyle(p.textPrimary)
-                .disabled(isLocked || readingMode)
+                .foregroundStyle(.black)
+            .shadow(color: .white.opacity(0.95), radius: 1, x: 0, y: 1)
+                .allowsHitTesting(!(isLocked || readingMode))
                 .onSubmit {
                     guard let n = note, !readingMode, !isLocked else { return }
                     n.title = titleText
@@ -1328,14 +1330,16 @@ struct NoteEditorScreen: View {
                 .font(.system(size: 18, weight: .bold))
                 .padding(.horizontal, 12)
                 .frame(height: 46)
-                .background(p.railButton)
+                .background(.ultraThinMaterial)
+            .background(Color.white.opacity(0.48))
                 .clipShape(RoundedRectangle(cornerRadius: 15))
                 .overlay(
                     RoundedRectangle(cornerRadius: 15)
                         .stroke(p.outline, lineWidth: 1)
                 )
-                .foregroundStyle(p.textPrimary)
-                .disabled(isLocked || readingMode)
+                .foregroundStyle(.black)
+            .shadow(color: .white.opacity(0.95), radius: 1, x: 0, y: 1)
+                .allowsHitTesting(!(isLocked || readingMode))
                 .onSubmit {
                     guard let n = note, !readingMode, !isLocked else { return }
                     n.title = titleText
