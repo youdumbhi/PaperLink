@@ -888,18 +888,21 @@ struct NoteEditorScreen: View {
     }
 
     private var titlePillLandscape: some View {
-        let p = theme.palette
-        return TextField("Title", text: $titleText)
+        TextField("Title", text: $titleText)
             .font(.system(size: 17, weight: .bold))
             .padding(.horizontal, 12)
             .frame(height: titlePillHeight)
-            .background(p.railButton.opacity(0.95))
-            .clipShape(RoundedRectangle(cornerRadius: 16))
+            .foregroundStyle(.black)
+            .tint(.black)
+            .shadow(color: .white.opacity(0.95), radius: 1, x: 0, y: 1)
+            .background(.ultraThinMaterial)
+            .background(Color.white.opacity(0.45))
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 16)
-                    .stroke(p.outline.opacity(0.9), lineWidth: 1)
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(Color.black.opacity(0.20), lineWidth: 1)
             )
-            .foregroundStyle(p.textPrimary)
+            .shadow(color: .black.opacity(0.18), radius: 10, x: 0, y: 4)
             .frame(maxWidth: 420)
             .disabled(isLocked || readingMode)
             .onSubmit {
