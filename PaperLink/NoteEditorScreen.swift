@@ -669,14 +669,6 @@ struct NoteEditorScreen: View {
                     .padding(.top, topInset + 2)
                     .zIndex(20)
 
-                titlePillLandscape
-                    .opacity(controlsShouldHide ? 0.0 : 1.0)
-                    .animation(.easeInOut(duration: 0.15), value: controlsShouldHide)
-                    .frame(width: 240, alignment: .leading)
-                    .padding(.leading, 68)
-                    .padding(.top, topInset + 8)
-                    .zIndex(20)
-
                 HStack {
                     Spacer()
 
