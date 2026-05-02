@@ -139,7 +139,7 @@ struct LibraryView: View {
     @State private var pendingSingleTapWorkItem: DispatchWorkItem? = nil
     @State private var lastTapID: UUID? = nil
     @State private var lastTapDate: Date = .distantPast
-    private let doubleTapWindow: TimeInterval = 0.28
+    private let doubleTapWindow: TimeInterval = 0.18
 
     // Preview presentation (existing note)
     @State private var previewingNote: PLNote? = nil

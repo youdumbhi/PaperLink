@@ -701,17 +701,9 @@ struct NoteEditorScreen: View {
 
     private func phoneLandscapeLayout(topInset: CGFloat) -> some View {
         ZStack(alignment: .topLeading) {
-            HStack(spacing: 8) {
-                if shouldShowToolRail {
-                    toolRail
-                        .opacity(controlsShouldHide ? 0.0 : 1.0)
-                        .animation(.easeInOut(duration: 0.15), value: controlsShouldHide)
-                }
-
-                noteCanvas
-            }
-            .padding(.horizontal, outerPadLandscape)
-            .padding(.vertical, outerPadLandscape)
+            noteCanvas
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .ignoresSafeArea()
 
             if !hideChrome {
                 HStack(spacing: 10) {
@@ -761,13 +753,15 @@ struct NoteEditorScreen: View {
                 .zIndex(20)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .ignoresSafeArea()
     }
 
     private var noteCanvas: some View {
         let p = theme.palette
         let resolvedCanvasSize = noteCanvasSize == .zero ? UIScreen.main.bounds.size : noteCanvasSize
         let canvasFillStyle: AnyShapeStyle
-        let usesFullBleedCanvas = currentKind != .text
+        let usesFullBleedCanvas = isPhoneLandscape || currentKind != .text
 
         if currentKind == .text {
             canvasFillStyle = AnyShapeStyle(p.card)
