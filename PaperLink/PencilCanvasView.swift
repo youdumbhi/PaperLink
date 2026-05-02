@@ -242,7 +242,11 @@ final class PLCanvasContainerView: UIView {
             if oldValue != isReadOnly {
                 hasAppliedInitialZoom = false
                 hasAppliedInitialViewportFocus = false
-                setNeedsLayout()
+                if let originalDrawingData {
+                    applyDrawingData(originalDrawingData)
+                } else {
+                    setNeedsLayout()
+                }
             }
         }
     }
@@ -255,6 +259,8 @@ final class PLCanvasContainerView: UIView {
         }
     }
 
+    private let readOnlyCropPadding: CGFloat = 56
+    private var originalDrawingData: Data?
     private var previousBoundsSize: CGSize = .zero
     private var hasAppliedInitialZoom = false
     private var hasAppliedInitialViewportFocus = false
@@ -323,14 +329,19 @@ final class PLCanvasContainerView: UIView {
     }
 
     func applyDrawingData(_ data: Data) {
+        originalDrawingData = data
         guard let next = try? PKDrawing(data: data) else { return }
-        if next.dataRepresentation() != canvasView.drawing.dataRepresentation() {
-            canvasView.drawing = next
+        let displayDrawing = normalizedReadOnlyDrawingIfNeeded(next)
+        if displayDrawing.dataRepresentation() != canvasView.drawing.dataRepresentation() {
+            canvasView.drawing = displayDrawing
             if isInfiniteCanvas {
+                hasAppliedInitialZoom = false
+                hasAppliedInitialViewportFocus = false
                 setNeedsLayout()
-                if !hasAppliedInitialViewportFocus {
-                    focusViewportOnDrawingIfAvailable(animated: false)
-                    hasAppliedInitialViewportFocus = true
+                DispatchQueue.main.async {
+                    self.focusViewportOnDrawingIfAvailable(animated: false)
+                    self.hasAppliedInitialViewportFocus = true
+                    self.refreshOverlay()
                 }
             }
         }
@@ -396,13 +407,23 @@ final class PLCanvasContainerView: UIView {
     }
 
     private func largeCanvasSize(for bounds: CGSize) -> CGSize {
+        let drawingBounds = canvasView.drawing.bounds
+
+        if isReadOnly, !drawingBounds.isEmpty {
+            let compactWidth = drawingBounds.maxX + readOnlyCropPadding
+            let compactHeight = drawingBounds.maxY + readOnlyCropPadding
+            return CGSize(
+                width: max(bounds.width, compactWidth),
+                height: max(bounds.height, compactHeight)
+            )
+        }
+
         let screenSize = UIScreen.main.bounds.size
         let seed = CGSize(
             width: max(bounds.width, screenSize.width),
             height: max(bounds.height, screenSize.height)
         )
-        let drawingBounds = canvasView.drawing.bounds
-        let drawingPadding: CGFloat = isReadOnly ? 420 : 240
+        let drawingPadding: CGFloat = 240
         let requiredDrawingSize: CGSize
         if drawingBounds.isEmpty {
             requiredDrawingSize = .zero
@@ -437,7 +458,7 @@ final class PLCanvasContainerView: UIView {
             return fillZoom
         }
 
-        let padded = drawingBounds.insetBy(dx: -160, dy: -160)
+        let padded = drawingBounds.insetBy(dx: -readOnlyCropPadding, dy: -readOnlyCropPadding)
         let fitWidth = bounds.width / max(padded.width, 1)
         let fitHeight = bounds.height / max(padded.height, 1)
         let fitZoom = min(fitWidth, fitHeight)
@@ -450,11 +471,21 @@ final class PLCanvasContainerView: UIView {
         if drawingBounds.isEmpty {
             center = CGPoint(x: canvasView.contentSize.width * 0.5, y: canvasView.contentSize.height * 0.5)
         } else {
-            let padding: CGFloat = isReadOnly ? 160 : 120
-            let padded = drawingBounds.insetBy(dx: -padding, dy: -padding)
-            center = CGPoint(x: padded.midX, y: padded.midY)
+            center = CGPoint(x: drawingBounds.midX, y: drawingBounds.midY)
         }
         canvasView.setContentOffset(clampedOffset(forDocumentCenter: center), animated: animated)
+    }
+
+    private func normalizedReadOnlyDrawingIfNeeded(_ drawing: PKDrawing) -> PKDrawing {
+        guard isReadOnly, isInfiniteCanvas else { return drawing }
+        let drawingBounds = drawing.bounds
+        guard !drawingBounds.isEmpty else { return drawing }
+
+        let transform = CGAffineTransform(
+            translationX: readOnlyCropPadding - drawingBounds.minX,
+            y: readOnlyCropPadding - drawingBounds.minY
+        )
+        return drawing.transformed(using: transform)
     }
 
     private func clampedOffset(forDocumentCenter center: CGPoint) -> CGPoint {
