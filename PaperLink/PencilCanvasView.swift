@@ -131,8 +131,7 @@ struct PencilCanvasView: UIViewRepresentable {
 
         if context.coordinator.lastResetToken != resetViewportToken {
             context.coordinator.lastResetToken = resetViewportToken
-            uiView.resetViewport(animated: true)
-            context.coordinator.onZoomingChanged?(false)
+            uiView.resetViewport(animated: false)
         }
     }
 
@@ -157,11 +156,12 @@ struct PencilCanvasView: UIViewRepresentable {
         container.canvasView.showsHorizontalScrollIndicator = false
         container.canvasView.showsVerticalScrollIndicator = false
         container.canvasView.delaysContentTouches = false
-        container.canvasView.canCancelContentTouches = true
-        container.canvasView.bounces = isInfiniteCanvas
-        container.canvasView.bouncesZoom = isInfiniteCanvas
-        container.canvasView.alwaysBounceHorizontal = isInfiniteCanvas
-        container.canvasView.alwaysBounceVertical = isInfiniteCanvas
+        container.canvasView.canCancelContentTouches = !isReadOnly
+        container.canvasView.decelerationRate = .fast
+        container.canvasView.bounces = isInfiniteCanvas && !isReadOnly
+        container.canvasView.bouncesZoom = isInfiniteCanvas && !isReadOnly
+        container.canvasView.alwaysBounceHorizontal = isInfiniteCanvas && !isReadOnly
+        container.canvasView.alwaysBounceVertical = isInfiniteCanvas && !isReadOnly
         container.canvasView.maximumZoomScale = isInfiniteCanvas ? 6.0 : 1.0
         container.canvasView.drawingGestureRecognizer.isEnabled = !isReadOnly
         // Keep drawing responsive: one contact draws, two fingers pan/zoom.
@@ -210,7 +210,7 @@ struct PencilCanvasView: UIViewRepresentable {
         }
 
         func scrollViewWillBeginZooming(_ scrollView: UIScrollView, with view: UIView?) {
-            onZoomingChanged?(true)
+            // Avoid bouncing through SwiftUI state here; that caused a visible pause before panning resumed on iPhone.
         }
 
         func scrollViewDidZoom(_ scrollView: UIScrollView) {
@@ -223,7 +223,6 @@ struct PencilCanvasView: UIViewRepresentable {
 
         func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
             container?.refreshOverlay()
-            onZoomingChanged?(false)
         }
 
         func isAwaitingBindingUpdate(for data: Data) -> Bool {
@@ -342,7 +341,7 @@ final class PLCanvasContainerView: UIView {
         let targetZoom = initialViewportZoomScale()
         canvasView.setZoomScale(targetZoom, animated: animated)
         DispatchQueue.main.async {
-            self.focusViewportOnDrawingIfAvailable(animated: animated)
+            self.focusViewportOnDrawingIfAvailable(animated: false)
             self.refreshOverlay()
         }
     }
@@ -489,6 +488,7 @@ final class PLViewportPaperOverlayView: UIView {
 
     private var viewportOffset: CGPoint = .zero
     private var viewportZoomScale: CGFloat = 1.0
+    private var redrawQueued = false
 
     func apply(
         style: PLDrawingPaperStyle,
@@ -504,7 +504,7 @@ final class PLViewportPaperOverlayView: UIView {
         currentLineSpacing = max(8, lineSpacing)
         currentDotSpacing = max(8, dotSpacing)
         currentDotSize = max(0.8, dotSize)
-        setNeedsDisplay()
+        queueRedraw()
     }
 
     func updateViewport(contentOffset: CGPoint, zoomScale: CGFloat, contentSize: CGSize) {
@@ -512,7 +512,17 @@ final class PLViewportPaperOverlayView: UIView {
         if viewportOffset != contentOffset || abs(viewportZoomScale - newZoom) > 0.0001 {
             viewportOffset = contentOffset
             viewportZoomScale = newZoom
-            setNeedsDisplay()
+            queueRedraw()
+        }
+    }
+
+    private func queueRedraw() {
+        guard !redrawQueued else { return }
+        redrawQueued = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.redrawQueued = false
+            self.setNeedsDisplay()
         }
     }
 
