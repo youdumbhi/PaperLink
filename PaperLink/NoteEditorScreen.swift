@@ -845,6 +845,12 @@ struct NoteEditorScreen: View {
                 .clipShape(RoundedRectangle(cornerRadius: 18))
         }
         .buttonStyle(.plain)
+
+                    titlePillLandscape
+                        .opacity(controlsShouldHide ? 0.0 : 1.0)
+                        .animation(.easeInOut(duration: 0.15), value: controlsShouldHide)
+                        .frame(maxWidth: 260, alignment: .leading)
+
     }
 
     private var sideRotateButton: some View {
@@ -894,7 +900,7 @@ struct NoteEditorScreen: View {
             .tint(.black)
             .shadow(color: .white.opacity(1.0), radius: 1.5, x: 0, y: 1)
             .shadow(color: .black.opacity(0.18), radius: 3, x: 0, y: 1)
-            .frame(maxWidth: 420)
+            .frame(maxWidth: 260, alignment: .leading)
             .allowsHitTesting(!(isLocked || readingMode))
             .onSubmit {
                 guard let n = note, !readingMode, !isLocked else { return }
