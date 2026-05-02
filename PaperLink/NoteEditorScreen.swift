@@ -712,7 +712,9 @@ struct NoteEditorScreen: View {
                     if currentKind == .drawing {
                         Text(titleText.isEmpty ? "Untitled" : titleText)
                             .font(.system(size: 15, weight: .bold))
-                            .foregroundStyle(theme.palette.textPrimary)
+                            .foregroundStyle(.white)
+                            .blendMode(.difference)
+                            .compositingGroup()
                             .lineLimit(1)
                             .truncationMode(.tail)
                             .frame(maxWidth: 180, alignment: .leading)
