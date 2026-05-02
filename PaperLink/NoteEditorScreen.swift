@@ -701,8 +701,12 @@ struct NoteEditorScreen: View {
 
     private func phoneLandscapeLayout(topInset: CGFloat) -> some View {
         ZStack(alignment: .topLeading) {
+            theme.palette.canvas
+                .ignoresSafeArea()
+
             noteCanvas
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(theme.palette.canvas.ignoresSafeArea())
                 .ignoresSafeArea()
 
             if !hideChrome {
@@ -714,7 +718,8 @@ struct NoteEditorScreen: View {
                             .font(.system(size: 15, weight: .bold))
                             .foregroundStyle(.white)
                             .blendMode(.difference)
-                            .compositingGroup()
+                            .shadow(color: .black.opacity(0.90), radius: 2, x: 0, y: 1)
+                            .shadow(color: .white.opacity(0.75), radius: 4, x: 0, y: 0)
                             .lineLimit(1)
                             .truncationMode(.tail)
                             .frame(maxWidth: 180, alignment: .leading)
