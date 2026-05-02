@@ -894,15 +894,8 @@ struct NoteEditorScreen: View {
             .frame(height: titlePillHeight)
             .foregroundStyle(.black)
             .tint(.black)
-            .shadow(color: .white.opacity(0.95), radius: 1, x: 0, y: 1)
-            .background(.ultraThinMaterial)
-            .background(Color.white.opacity(0.45))
-            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(Color.black.opacity(0.20), lineWidth: 1)
-            )
-            .shadow(color: .black.opacity(0.18), radius: 10, x: 0, y: 4)
+            .shadow(color: .white.opacity(1.0), radius: 1.5, x: 0, y: 1)
+            .shadow(color: .black.opacity(0.18), radius: 3, x: 0, y: 1)
             .frame(maxWidth: 420)
             .allowsHitTesting(!(isLocked || readingMode))
             .onSubmit {
@@ -1141,7 +1134,6 @@ struct NoteEditorScreen: View {
                     .padding(.horizontal, 14)
                     .background(p.textPrimary.opacity(0.88))
                     .foregroundStyle((p.textPrimary == .black ? Color.white : Color.black).opacity(0.92))
-                    .clipShape(RoundedRectangle(cornerRadius: 16))
             }
             .buttonStyle(.plain)
 
@@ -1149,16 +1141,14 @@ struct NoteEditorScreen: View {
                 .font(.system(size: 19, weight: .bold))
                 .padding(.horizontal, 12)
                 .frame(height: 50)
-                .frame(minWidth: 180, maxWidth: 340)
-                .background(.ultraThinMaterial)
-            .background(Color.white.opacity(0.48))
-                .clipShape(RoundedRectangle(cornerRadius: 16))
+                .frame(minWidth: 120, maxWidth: .infinity, alignment: .leading)
                 .overlay(
                     RoundedRectangle(cornerRadius: 16)
                         .stroke(p.outline, lineWidth: 1)
                 )
                 .foregroundStyle(.black)
-            .shadow(color: .white.opacity(0.95), radius: 1, x: 0, y: 1)
+                .shadow(color: .white.opacity(1.0), radius: 1.5, x: 0, y: 1)
+                .shadow(color: .black.opacity(0.18), radius: 3, x: 0, y: 1)
                 .allowsHitTesting(!(isLocked || readingMode))
                 .onSubmit {
                     guard let n = note, !readingMode, !isLocked else { return }
@@ -1180,7 +1170,6 @@ struct NoteEditorScreen: View {
                         .font(.system(size: 18, weight: .bold))
                         .frame(width: 50, height: 50)
                         .background(p.railButton)
-                        .clipShape(RoundedRectangle(cornerRadius: 16))
                         .overlay(
                             RoundedRectangle(cornerRadius: 16)
                                 .stroke(p.outline, lineWidth: 1)
@@ -1195,7 +1184,6 @@ struct NoteEditorScreen: View {
                     .font(.system(size: 18, weight: .bold))
                     .frame(width: 50, height: 50)
                     .background(p.railButton)
-                    .clipShape(RoundedRectangle(cornerRadius: 16))
                     .overlay(
                         RoundedRectangle(cornerRadius: 16)
                             .stroke(p.outline, lineWidth: 1)
@@ -1211,7 +1199,6 @@ struct NoteEditorScreen: View {
                         .frame(height: 50)
                         .padding(.horizontal, 16)
                         .background(canCreateDraft ? p.accent : p.textPrimary.opacity(0.12))
-                        .clipShape(RoundedRectangle(cornerRadius: 16))
                         .overlay(
                             RoundedRectangle(cornerRadius: 16)
                                 .stroke(p.outline, lineWidth: 1)
@@ -1235,7 +1222,6 @@ struct NoteEditorScreen: View {
                                 .frame(height: 50)
                                 .padding(.horizontal, 16)
                                 .background(p.accent)
-                                .clipShape(RoundedRectangle(cornerRadius: 16))
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 16)
                                         .stroke(p.outline, lineWidth: 1)
@@ -1250,7 +1236,6 @@ struct NoteEditorScreen: View {
                                 .frame(height: 50)
                                 .padding(.horizontal, 16)
                                 .background(p.accent)
-                                .clipShape(RoundedRectangle(cornerRadius: 16))
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 16)
                                         .stroke(p.outline.opacity(0.8), lineWidth: 2)
@@ -1268,7 +1253,6 @@ struct NoteEditorScreen: View {
                         .font(.system(size: 18, weight: .bold))
                         .frame(width: 50, height: 50)
                         .background(p.railButton)
-                        .clipShape(RoundedRectangle(cornerRadius: 16))
                         .overlay(
                             RoundedRectangle(cornerRadius: 16)
                                 .stroke(p.outline, lineWidth: 1)
@@ -1288,7 +1272,6 @@ struct NoteEditorScreen: View {
                         .font(.system(size: 18, weight: .bold))
                         .frame(width: 50, height: 50)
                         .background(p.railButton)
-                        .clipShape(RoundedRectangle(cornerRadius: 16))
                         .overlay(
                             RoundedRectangle(cornerRadius: 16)
                                 .stroke(p.outline, lineWidth: 1)
@@ -1311,7 +1294,6 @@ struct NoteEditorScreen: View {
                         .frame(width: 46, height: 46)
                         .background(p.textPrimary.opacity(0.88))
                         .foregroundStyle((p.textPrimary == .black ? Color.white : Color.black).opacity(0.92))
-                        .clipShape(RoundedRectangle(cornerRadius: 15))
                 }
                 .buttonStyle(.plain)
 
@@ -1330,15 +1312,14 @@ struct NoteEditorScreen: View {
                 .font(.system(size: 18, weight: .bold))
                 .padding(.horizontal, 12)
                 .frame(height: 46)
-                .background(.ultraThinMaterial)
-            .background(Color.white.opacity(0.48))
-                .clipShape(RoundedRectangle(cornerRadius: 15))
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .overlay(
                     RoundedRectangle(cornerRadius: 15)
                         .stroke(p.outline, lineWidth: 1)
                 )
                 .foregroundStyle(.black)
-            .shadow(color: .white.opacity(0.95), radius: 1, x: 0, y: 1)
+                .shadow(color: .white.opacity(1.0), radius: 1.5, x: 0, y: 1)
+                .shadow(color: .black.opacity(0.18), radius: 3, x: 0, y: 1)
                 .allowsHitTesting(!(isLocked || readingMode))
                 .onSubmit {
                     guard let n = note, !readingMode, !isLocked else { return }
@@ -1364,7 +1345,6 @@ struct NoteEditorScreen: View {
                     .font(.system(size: 17, weight: .bold))
                     .frame(width: 46, height: 46)
                     .background(canCreateDraft ? p.accent : p.textPrimary.opacity(0.12))
-                    .clipShape(RoundedRectangle(cornerRadius: 15))
                     .overlay(
                         RoundedRectangle(cornerRadius: 15)
                             .stroke(p.outline, lineWidth: 1)
@@ -1386,7 +1366,6 @@ struct NoteEditorScreen: View {
                         .font(.system(size: 17, weight: .bold))
                         .frame(width: 46, height: 46)
                         .background(p.accent)
-                        .clipShape(RoundedRectangle(cornerRadius: 15))
                         .overlay(
                             RoundedRectangle(cornerRadius: 15)
                                 .stroke(p.outline, lineWidth: 1)
@@ -1400,7 +1379,6 @@ struct NoteEditorScreen: View {
                         .font(.system(size: 17, weight: .bold))
                         .frame(width: 46, height: 46)
                         .background(p.accent)
-                        .clipShape(RoundedRectangle(cornerRadius: 15))
                         .overlay(
                             RoundedRectangle(cornerRadius: 15)
                                 .stroke(p.outline.opacity(0.8), lineWidth: 2)
@@ -1425,7 +1403,6 @@ struct NoteEditorScreen: View {
                         .font(.system(size: 17, weight: .bold))
                         .frame(width: 46, height: 46)
                         .background(p.railButton)
-                        .clipShape(RoundedRectangle(cornerRadius: 15))
                         .overlay(
                             RoundedRectangle(cornerRadius: 15)
                                 .stroke(p.outline, lineWidth: 1)
@@ -1445,7 +1422,6 @@ struct NoteEditorScreen: View {
                 .font(.system(size: 17, weight: .bold))
                 .frame(width: 46, height: 46)
                 .background(p.railButton)
-                .clipShape(RoundedRectangle(cornerRadius: 15))
                 .overlay(
                     RoundedRectangle(cornerRadius: 15)
                         .stroke(p.outline, lineWidth: 1)
@@ -3668,7 +3644,6 @@ private struct CustomInkColorSheet: View {
                 .font(.system(size: 16, weight: .bold))
                 .padding(14)
                 .background(p.card.opacity(0.75))
-                .clipShape(RoundedRectangle(cornerRadius: 16))
                 .overlay(
                     RoundedRectangle(cornerRadius: 16)
                         .stroke(p.outline, lineWidth: 1)
