@@ -648,7 +648,7 @@ struct NoteEditorScreen: View {
     }
 
     private func phoneLandscapeLayout(topInset: CGFloat) -> some View {
-        ZStack {
+        ZStack(alignment: .topLeading) {
             HStack(spacing: 8) {
                 if shouldShowToolRail {
                     toolRail
@@ -662,33 +662,35 @@ struct NoteEditorScreen: View {
             .padding(.vertical, outerPadLandscape)
 
             if !hideChrome {
-                VStack {
-                    HStack(spacing: 8) {
-                        sideBackButton
-                            .opacity(controlsShouldHide ? 0.0 : 1.0)
-                            .animation(.easeInOut(duration: 0.15), value: controlsShouldHide)
-
-                        titlePillLandscape
-                            .opacity(controlsShouldHide ? 0.0 : 1.0)
-                            .animation(.easeInOut(duration: 0.15), value: controlsShouldHide)
-                            .frame(maxWidth: 260, alignment: .leading)
-
-                        Spacer(minLength: 8)
-
-                        sideRotateButton
-                            .opacity((controlsShouldHide || !shouldShowRotate) ? 0.0 : 1.0)
-                            .animation(.easeInOut(duration: 0.15), value: controlsShouldHide)
-
-                        sidePropertiesButton
-                            .opacity(controlsShouldHide ? 0.0 : 1.0)
-                            .animation(.easeInOut(duration: 0.15), value: controlsShouldHide)
-                    }
+                sideBackButton
+                    .opacity(controlsShouldHide ? 0.0 : 1.0)
+                    .animation(.easeInOut(duration: 0.15), value: controlsShouldHide)
+                    .padding(.leading, 8)
                     .padding(.top, topInset + 2)
-                    .padding(.horizontal, 8)
+                    .zIndex(20)
 
+                titlePillLandscape
+                    .opacity(controlsShouldHide ? 0.0 : 1.0)
+                    .animation(.easeInOut(duration: 0.15), value: controlsShouldHide)
+                    .frame(width: 240, alignment: .leading)
+                    .padding(.leading, 68)
+                    .padding(.top, topInset + 8)
+                    .zIndex(20)
+
+                HStack {
                     Spacer()
+
+                    sideRotateButton
+                        .opacity((controlsShouldHide || !shouldShowRotate) ? 0.0 : 1.0)
+                        .animation(.easeInOut(duration: 0.15), value: controlsShouldHide)
+
+                    sidePropertiesButton
+                        .opacity(controlsShouldHide ? 0.0 : 1.0)
+                        .animation(.easeInOut(duration: 0.15), value: controlsShouldHide)
+                        .padding(.trailing, 8)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .padding(.top, topInset + 2)
+                .zIndex(20)
 
                 VStack {
                     Spacer()
@@ -701,6 +703,7 @@ struct NoteEditorScreen: View {
                             .padding(.bottom, 8)
                     }
                 }
+                .zIndex(20)
             }
         }
     }
@@ -901,7 +904,7 @@ struct NoteEditorScreen: View {
             .tint(.black)
             .shadow(color: .white.opacity(1.0), radius: 1.5, x: 0, y: 1)
             .shadow(color: .black.opacity(0.18), radius: 3, x: 0, y: 1)
-            .frame(maxWidth: 260, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
             .allowsHitTesting(!(isLocked || readingMode))
             .onSubmit {
                 guard let n = note, !readingMode, !isLocked else { return }
