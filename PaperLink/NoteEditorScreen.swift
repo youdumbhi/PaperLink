@@ -619,11 +619,18 @@ struct NoteEditorScreen: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             if !hideChrome {
-                topBar
-                    .padding(.top, topInset)
-                    .zIndex(10)
-                    .opacity(controlsShouldHide ? 0.0 : 1.0)
-                    .animation(.easeInOut(duration: 0.15), value: controlsShouldHide)
+                if isPhone && (currentKind == .drawing || currentKind == .photo) {
+                    portraitMediaTopChrome(topInset: topInset)
+                        .zIndex(10)
+                        .opacity(controlsShouldHide ? 0.0 : 1.0)
+                        .animation(.easeInOut(duration: 0.15), value: controlsShouldHide)
+                } else {
+                    topBar
+                        .padding(.top, topInset)
+                        .zIndex(10)
+                        .opacity(controlsShouldHide ? 0.0 : 1.0)
+                        .animation(.easeInOut(duration: 0.15), value: controlsShouldHide)
+                }
             }
 
             if shouldShowToolRail && !usesFloatingDrawingPalette {
@@ -645,6 +652,51 @@ struct NoteEditorScreen: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+
+    private func portraitMediaTopChrome(topInset: CGFloat) -> some View {
+        HStack(spacing: 10) {
+            Button { handleBackPressed() } label: {
+                Image(systemName: backSystemImage)
+                    .font(.system(size: 20, weight: .bold))
+                    .frame(width: 50, height: 50)
+                    .foregroundStyle(.black)
+                    .background(Color.white.opacity(0.001))
+            }
+            .buttonStyle(.plain)
+
+            Text(titleText.isEmpty ? "Untitled" : titleText)
+                .font(.system(size: 22, weight: .bold))
+                .foregroundStyle(.black)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .shadow(color: .white.opacity(1.0), radius: 2, x: 0, y: 1)
+                .shadow(color: .black.opacity(0.20), radius: 3, x: 0, y: 1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            if shouldShowRotate {
+                Button { rotate90() } label: {
+                    Image(systemName: "rotate.right")
+                        .font(.system(size: 18, weight: .bold))
+                        .frame(width: 44, height: 44)
+                        .foregroundStyle(.black)
+                        .background(Color.white.opacity(0.001))
+                }
+                .buttonStyle(.plain)
+            }
+
+            Button { showProperties = true } label: {
+                Image(systemName: "slider.horizontal.3")
+                    .font(.system(size: 18, weight: .bold))
+                    .frame(width: 44, height: 44)
+                    .foregroundStyle(.black)
+                    .background(Color.white.opacity(0.001))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.top, topInset + 4)
+        .padding(.horizontal, 18)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
     private func phoneLandscapeLayout(topInset: CGFloat) -> some View {
