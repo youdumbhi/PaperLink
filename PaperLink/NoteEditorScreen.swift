@@ -662,27 +662,33 @@ struct NoteEditorScreen: View {
             .padding(.vertical, outerPadLandscape)
 
             if !hideChrome {
-                HStack {
-                    sideBackButton
-                        .opacity(controlsShouldHide ? 0.0 : 1.0)
-                        .animation(.easeInOut(duration: 0.15), value: controlsShouldHide)
-                        .padding(.leading, 8)
+                VStack {
+                    HStack(spacing: 8) {
+                        sideBackButton
+                            .opacity(controlsShouldHide ? 0.0 : 1.0)
+                            .animation(.easeInOut(duration: 0.15), value: controlsShouldHide)
 
-                    titlePillLandscape
-                        .opacity(controlsShouldHide ? 0.0 : 1.0)
-                        .animation(.easeInOut(duration: 0.15), value: controlsShouldHide)
-                        .frame(maxWidth: 260, alignment: .leading)
+                        titlePillLandscape
+                            .opacity(controlsShouldHide ? 0.0 : 1.0)
+                            .animation(.easeInOut(duration: 0.15), value: controlsShouldHide)
+                            .frame(maxWidth: 260, alignment: .leading)
+
+                        Spacer(minLength: 8)
+
+                        sideRotateButton
+                            .opacity((controlsShouldHide || !shouldShowRotate) ? 0.0 : 1.0)
+                            .animation(.easeInOut(duration: 0.15), value: controlsShouldHide)
+
+                        sidePropertiesButton
+                            .opacity(controlsShouldHide ? 0.0 : 1.0)
+                            .animation(.easeInOut(duration: 0.15), value: controlsShouldHide)
+                    }
+                    .padding(.top, topInset + 2)
+                    .padding(.horizontal, 8)
 
                     Spacer()
-                    sideRotateButton
-                        .opacity((controlsShouldHide || !shouldShowRotate) ? 0.0 : 1.0)
-                        .animation(.easeInOut(duration: 0.15), value: controlsShouldHide)
-                    sidePropertiesButton
-                        .opacity(controlsShouldHide ? 0.0 : 1.0)
-                        .animation(.easeInOut(duration: 0.15), value: controlsShouldHide)
-                        .padding(.trailing, 8)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
 
                 VStack {
                     Spacer()
