@@ -667,6 +667,12 @@ struct NoteEditorScreen: View {
                         .opacity(controlsShouldHide ? 0.0 : 1.0)
                         .animation(.easeInOut(duration: 0.15), value: controlsShouldHide)
                         .padding(.leading, 8)
+
+                    titlePillLandscape
+                        .opacity(controlsShouldHide ? 0.0 : 1.0)
+                        .animation(.easeInOut(duration: 0.15), value: controlsShouldHide)
+                        .frame(maxWidth: 260, alignment: .leading)
+
                     Spacer()
                     sideRotateButton
                         .opacity((controlsShouldHide || !shouldShowRotate) ? 0.0 : 1.0)
@@ -677,14 +683,6 @@ struct NoteEditorScreen: View {
                         .padding(.trailing, 8)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                VStack {
-                    titlePillLandscape
-                        .opacity(controlsShouldHide ? 0.0 : 1.0)
-                        .animation(.easeInOut(duration: 0.15), value: controlsShouldHide)
-                        .padding(.top, topInset + 2)
-                    Spacer()
-                }
 
                 VStack {
                     Spacer()
