@@ -846,11 +846,6 @@ struct NoteEditorScreen: View {
         }
         .buttonStyle(.plain)
 
-                    titlePillLandscape
-                        .opacity(controlsShouldHide ? 0.0 : 1.0)
-                        .animation(.easeInOut(duration: 0.15), value: controlsShouldHide)
-                        .frame(maxWidth: 260, alignment: .leading)
-
     }
 
     private var sideRotateButton: some View {
