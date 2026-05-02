@@ -143,6 +143,14 @@ struct PencilCanvasView: UIViewRepresentable {
     private func configure(_ container: PLCanvasContainerView, coordinator: Coordinator) {
         container.canvasScaleMultiplier = canvasScaleMultiplier
         container.minimumCanvasSize = minimumCanvasSize
+        container.configurePaper(
+            style: paperStyle,
+            baseColor: paperBaseColor,
+            guideColor: paperGuideColor,
+            lineSpacing: lineSpacing,
+            dotSpacing: dotSpacing,
+            dotSize: dotSize
+        )
         container.isInfiniteCanvas = isInfiniteCanvas
         container.isReadOnly = isReadOnly
         container.canvasView.tool = tool
@@ -165,20 +173,12 @@ struct PencilCanvasView: UIViewRepresentable {
         container.canvasView.maximumZoomScale = isInfiniteCanvas ? 6.0 : 1.0
         container.canvasView.drawingGestureRecognizer.isEnabled = !isReadOnly
         // Keep drawing responsive: one contact draws, two fingers pan/zoom.
-        // In read-only mode, one-finger panning makes iPhone viewing usable.
+        // Read-only drawing notes use a separate UIScrollView snapshot viewer.
         container.canvasView.panGestureRecognizer.minimumNumberOfTouches = isReadOnly ? 1 : 2
         container.canvasView.panGestureRecognizer.maximumNumberOfTouches = 2
         container.updateAllowedTouchTypes(
             allowsFingerDrawing: allowsFingerDrawing,
             drawingPolicy: drawingPolicy
-        )
-        container.overlayView.apply(
-            style: paperStyle,
-            baseColor: paperBaseColor,
-            guideColor: paperGuideColor,
-            lineSpacing: lineSpacing,
-            dotSpacing: dotSpacing,
-            dotSize: dotSize
         )
         container.refreshOverlay()
     }
@@ -232,9 +232,12 @@ struct PencilCanvasView: UIViewRepresentable {
     }
 }
 
-final class PLCanvasContainerView: UIView {
+final class PLCanvasContainerView: UIView, UIScrollViewDelegate {
     let overlayView = PLViewportPaperOverlayView()
     let canvasView = PLCanvasView()
+
+    private let readOnlyScrollView = UIScrollView()
+    private let readOnlyImageView = UIImageView()
 
     var canvasScaleMultiplier: CGFloat = 5.0
     var minimumCanvasSize: CGSize = CGSize(width: 1800, height: 1800)
@@ -243,6 +246,8 @@ final class PLCanvasContainerView: UIView {
             if oldValue != isReadOnly {
                 hasAppliedInitialZoom = false
                 hasAppliedInitialViewportFocus = false
+                updateModeVisibility()
+                markReadOnlySnapshotDirty()
                 setNeedsLayout()
             }
         }
@@ -252,6 +257,9 @@ final class PLCanvasContainerView: UIView {
             if oldValue != isInfiniteCanvas {
                 hasAppliedInitialZoom = false
                 hasAppliedInitialViewportFocus = false
+                updateModeVisibility()
+                markReadOnlySnapshotDirty()
+                setNeedsLayout()
             }
         }
     }
@@ -259,6 +267,22 @@ final class PLCanvasContainerView: UIView {
     private var previousBoundsSize: CGSize = .zero
     private var hasAppliedInitialZoom = false
     private var hasAppliedInitialViewportFocus = false
+    private var latestDrawingData: Data?
+    private var readOnlySnapshotDirty = true
+    private var lastRenderedSnapshotKey: String?
+
+    private var currentPaperStyle: PLDrawingPaperStyle = .lined
+    private var currentPaperBaseColor: UIColor = UIColor(red: 0.98, green: 0.97, blue: 0.95, alpha: 1.0)
+    private var currentPaperGuideColor: UIColor = UIColor.black.withAlphaComponent(0.08)
+    private var currentLineSpacing: CGFloat = CGFloat(PLDrawingDefaults.lineSpacing)
+    private var currentDotSpacing: CGFloat = CGFloat(PLDrawingDefaults.dotSpacing)
+    private var currentDotSize: CGFloat = CGFloat(PLDrawingDefaults.dotSize)
+
+    private var usesReadOnlySnapshotViewer: Bool {
+        isReadOnly && isInfiniteCanvas
+    }
+
+    private let readOnlyCropPadding: CGFloat = 64
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -281,6 +305,65 @@ final class PLCanvasContainerView: UIView {
         // PencilKit can flip light/dark ink appearance under dark traits.
         // The note surface is always rendered as light paper, so keep the canvas in light mode.
         canvasView.overrideUserInterfaceStyle = .light
+
+        readOnlyScrollView.delegate = self
+        readOnlyScrollView.backgroundColor = .clear
+        readOnlyScrollView.showsHorizontalScrollIndicator = false
+        readOnlyScrollView.showsVerticalScrollIndicator = false
+        readOnlyScrollView.contentInsetAdjustmentBehavior = .never
+        readOnlyScrollView.delaysContentTouches = false
+        readOnlyScrollView.canCancelContentTouches = true
+        readOnlyScrollView.bounces = true
+        readOnlyScrollView.bouncesZoom = true
+        readOnlyScrollView.maximumZoomScale = 6.0
+        readOnlyScrollView.minimumZoomScale = 1.0
+
+        readOnlyImageView.contentMode = .topLeft
+        readOnlyImageView.isUserInteractionEnabled = true
+        readOnlyScrollView.addSubview(readOnlyImageView)
+        addSubview(readOnlyScrollView)
+
+        updateModeVisibility()
+    }
+
+    func configurePaper(
+        style: PLDrawingPaperStyle,
+        baseColor: UIColor,
+        guideColor: UIColor,
+        lineSpacing: CGFloat,
+        dotSpacing: CGFloat,
+        dotSize: CGFloat
+    ) {
+        let normalizedLineSpacing = max(8, lineSpacing)
+        let normalizedDotSpacing = max(8, dotSpacing)
+        let normalizedDotSize = max(0.8, dotSize)
+
+        let changed = currentPaperStyle != style ||
+            currentPaperBaseColor != baseColor ||
+            currentPaperGuideColor != guideColor ||
+            abs(currentLineSpacing - normalizedLineSpacing) > 0.001 ||
+            abs(currentDotSpacing - normalizedDotSpacing) > 0.001 ||
+            abs(currentDotSize - normalizedDotSize) > 0.001
+
+        currentPaperStyle = style
+        currentPaperBaseColor = baseColor
+        currentPaperGuideColor = guideColor
+        currentLineSpacing = normalizedLineSpacing
+        currentDotSpacing = normalizedDotSpacing
+        currentDotSize = normalizedDotSize
+
+        overlayView.apply(
+            style: style,
+            baseColor: baseColor,
+            guideColor: guideColor,
+            lineSpacing: normalizedLineSpacing,
+            dotSpacing: normalizedDotSpacing,
+            dotSize: normalizedDotSize
+        )
+
+        if changed {
+            markReadOnlySnapshotDirty()
+        }
     }
 
     func updateAllowedTouchTypes(allowsFingerDrawing: Bool, drawingPolicy: PKCanvasViewDrawingPolicy) {
@@ -311,7 +394,14 @@ final class PLCanvasContainerView: UIView {
         super.layoutSubviews()
         canvasView.frame = bounds
         overlayView.frame = bounds
+        readOnlyScrollView.frame = bounds
         guard bounds.width > 1, bounds.height > 1 else { return }
+
+        if usesReadOnlySnapshotViewer {
+            renderReadOnlySnapshotIfNeeded()
+            previousBoundsSize = bounds.size
+            return
+        }
 
         if isInfiniteCanvas {
             ensureLargeCanvasLayout(oldSize: oldSize, oldVisibleCenter: oldVisibleCenter)
@@ -324,6 +414,14 @@ final class PLCanvasContainerView: UIView {
     }
 
     func applyDrawingData(_ data: Data) {
+        latestDrawingData = data
+
+        if usesReadOnlySnapshotViewer {
+            markReadOnlySnapshotDirty()
+            renderReadOnlySnapshotIfNeeded()
+            return
+        }
+
         guard let next = try? PKDrawing(data: data) else { return }
         if next.dataRepresentation() != canvasView.drawing.dataRepresentation() {
             canvasView.drawing = next
@@ -338,6 +436,11 @@ final class PLCanvasContainerView: UIView {
     }
 
     func resetViewport(animated: Bool) {
+        if usesReadOnlySnapshotViewer {
+            resetReadOnlySnapshotViewport(animated: animated)
+            return
+        }
+
         guard isInfiniteCanvas else { return }
         let targetZoom = initialViewportZoomScale()
         canvasView.setZoomScale(targetZoom, animated: animated)
@@ -348,12 +451,33 @@ final class PLCanvasContainerView: UIView {
     }
 
     func refreshOverlay() {
-        overlayView.isHidden = !isInfiniteCanvas
+        overlayView.isHidden = !isInfiniteCanvas || usesReadOnlySnapshotViewer
         overlayView.updateViewport(
             contentOffset: canvasView.contentOffset,
             zoomScale: canvasView.zoomScale,
             contentSize: canvasView.contentSize
         )
+    }
+
+    func viewForZooming(in scrollView: UIScrollView) -> UIView? {
+        scrollView === readOnlyScrollView ? readOnlyImageView : nil
+    }
+
+    func scrollViewDidZoom(_ scrollView: UIScrollView) {
+        guard scrollView === readOnlyScrollView else { return }
+        centerReadOnlyImageIfNeeded()
+    }
+
+    private func updateModeVisibility() {
+        let showReadOnlyViewer = usesReadOnlySnapshotViewer
+        readOnlyScrollView.isHidden = !showReadOnlyViewer
+        canvasView.isHidden = showReadOnlyViewer
+        overlayView.isHidden = showReadOnlyViewer || !isInfiniteCanvas
+    }
+
+    private func markReadOnlySnapshotDirty() {
+        readOnlySnapshotDirty = true
+        lastRenderedSnapshotKey = nil
     }
 
     private func ensurePlainCanvasLayout() {
@@ -458,6 +582,138 @@ final class PLCanvasContainerView: UIView {
         canvasView.setContentOffset(clampedOffset(forDocumentCenter: center), animated: animated)
     }
 
+    private func renderReadOnlySnapshotIfNeeded() {
+        guard usesReadOnlySnapshotViewer, bounds.width > 1, bounds.height > 1 else { return }
+        guard let latestDrawingData, let drawing = try? PKDrawing(data: latestDrawingData) else { return }
+
+        let drawingBounds = drawing.bounds
+        let cropRect: CGRect
+        if drawingBounds.isEmpty {
+            cropRect = CGRect(origin: .zero, size: bounds.size)
+        } else {
+            cropRect = drawingBounds.insetBy(dx: -readOnlyCropPadding, dy: -readOnlyCropPadding)
+        }
+
+        let normalizedSize = CGSize(
+            width: max(1, ceil(cropRect.width)),
+            height: max(1, ceil(cropRect.height))
+        )
+        let snapshotKey = "\(latestDrawingData.count)-\(Int(cropRect.minX))-\(Int(cropRect.minY))-\(Int(normalizedSize.width))-\(Int(normalizedSize.height))-\(currentPaperStyle.rawValue)-\(Int(currentLineSpacing))-\(Int(currentDotSpacing))-\(Int(currentDotSize * 10))"
+        guard readOnlySnapshotDirty || lastRenderedSnapshotKey != snapshotKey else {
+            layoutReadOnlySnapshotViewport()
+            return
+        }
+
+        let renderer = UIGraphicsImageRenderer(size: normalizedSize)
+        let drawingImage = drawing.image(from: cropRect, scale: UIScreen.main.scale)
+        let rendered = renderer.image { rendererContext in
+            let context = rendererContext.cgContext
+            currentPaperBaseColor.setFill()
+            context.fill(CGRect(origin: .zero, size: normalizedSize))
+            drawPaperGuides(in: context, size: normalizedSize, cropOrigin: cropRect.origin)
+            drawingImage.draw(in: CGRect(origin: .zero, size: normalizedSize))
+        }
+
+        readOnlyImageView.image = rendered
+        readOnlyImageView.frame = CGRect(origin: .zero, size: normalizedSize)
+        readOnlyScrollView.contentSize = normalizedSize
+        readOnlySnapshotDirty = false
+        lastRenderedSnapshotKey = snapshotKey
+        layoutReadOnlySnapshotViewport(resetZoom: true)
+    }
+
+    private func drawPaperGuides(in context: CGContext, size: CGSize, cropOrigin: CGPoint) {
+        switch currentPaperStyle {
+        case .blank:
+            return
+        case .lined:
+            drawReadOnlyLines(in: context, size: size, cropOrigin: cropOrigin)
+        case .dotGrid:
+            drawReadOnlyDots(in: context, size: size, cropOrigin: cropOrigin)
+        }
+    }
+
+    private func drawReadOnlyLines(in context: CGContext, size: CGSize, cropOrigin: CGPoint) {
+        let spacing = max(6, currentLineSpacing)
+        let pixel = 1.0 / UIScreen.main.scale
+        let phaseY = positiveRemainder(-cropOrigin.y, spacing)
+
+        context.setStrokeColor(currentPaperGuideColor.cgColor)
+        context.setLineWidth(pixel)
+
+        var y = phaseY
+        while y <= size.height + spacing {
+            context.move(to: CGPoint(x: 0, y: y))
+            context.addLine(to: CGPoint(x: size.width, y: y))
+            y += spacing
+        }
+        context.strokePath()
+    }
+
+    private func drawReadOnlyDots(in context: CGContext, size: CGSize, cropOrigin: CGPoint) {
+        let spacing = max(6, currentDotSpacing)
+        let dotSize = max(0.8, currentDotSize)
+        let phaseX = positiveRemainder(-cropOrigin.x, spacing)
+        let phaseY = positiveRemainder(-cropOrigin.y, spacing)
+
+        context.setFillColor(currentPaperGuideColor.cgColor)
+
+        var y = phaseY
+        while y <= size.height + spacing {
+            var x = phaseX
+            while x <= size.width + spacing {
+                let rect = CGRect(x: x - dotSize * 0.5, y: y - dotSize * 0.5, width: dotSize, height: dotSize)
+                context.fillEllipse(in: rect)
+                x += spacing
+            }
+            y += spacing
+        }
+    }
+
+    private func layoutReadOnlySnapshotViewport(resetZoom: Bool = false) {
+        let contentSize = readOnlyImageView.bounds.size
+        guard contentSize.width > 1, contentSize.height > 1, bounds.width > 1, bounds.height > 1 else { return }
+
+        let fitWidth = bounds.width / contentSize.width
+        let fitHeight = bounds.height / contentSize.height
+        let fitZoom = min(fitWidth, fitHeight)
+        let minZoom = min(max(fitZoom, 0.1), 1.0)
+        readOnlyScrollView.minimumZoomScale = minZoom
+        readOnlyScrollView.maximumZoomScale = max(6.0, minZoom * 6.0)
+
+        if resetZoom || readOnlyScrollView.zoomScale < minZoom || readOnlyScrollView.zoomScale == 1.0 {
+            readOnlyScrollView.setZoomScale(minZoom, animated: false)
+        }
+
+        centerReadOnlyImageIfNeeded()
+    }
+
+    private func resetReadOnlySnapshotViewport(animated: Bool) {
+        renderReadOnlySnapshotIfNeeded()
+        let contentSize = readOnlyImageView.bounds.size
+        guard contentSize.width > 1, contentSize.height > 1, bounds.width > 1, bounds.height > 1 else { return }
+
+        let fitWidth = bounds.width / contentSize.width
+        let fitHeight = bounds.height / contentSize.height
+        let fitZoom = min(fitWidth, fitHeight)
+        let minZoom = min(max(fitZoom, 0.1), 1.0)
+        readOnlyScrollView.setZoomScale(minZoom, animated: animated)
+        centerReadOnlyImageIfNeeded()
+    }
+
+    private func centerReadOnlyImageIfNeeded() {
+        let scaledWidth = readOnlyImageView.bounds.width * readOnlyScrollView.zoomScale
+        let scaledHeight = readOnlyImageView.bounds.height * readOnlyScrollView.zoomScale
+        let horizontalInset = max(0, (bounds.width - scaledWidth) * 0.5)
+        let verticalInset = max(0, (bounds.height - scaledHeight) * 0.5)
+        readOnlyScrollView.contentInset = UIEdgeInsets(
+            top: verticalInset,
+            left: horizontalInset,
+            bottom: verticalInset,
+            right: horizontalInset
+        )
+    }
+
     private func clampedOffset(forDocumentCenter center: CGPoint) -> CGPoint {
         let scaledCenter = CGPoint(x: center.x * canvasView.zoomScale, y: center.y * canvasView.zoomScale)
         return clampedOffset(forVisibleCenter: scaledCenter)
@@ -476,6 +732,12 @@ final class PLCanvasContainerView: UIView {
             x: min(max(0, proposed.x), maxX),
             y: min(max(0, proposed.y), maxY)
         )
+    }
+
+    private func positiveRemainder(_ value: CGFloat, _ modulus: CGFloat) -> CGFloat {
+        guard modulus > 0 else { return 0 }
+        let remainder = value.truncatingRemainder(dividingBy: modulus)
+        return remainder >= 0 ? remainder : remainder + modulus
     }
 }
 
