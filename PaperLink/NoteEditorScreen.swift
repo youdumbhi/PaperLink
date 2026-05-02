@@ -630,7 +630,7 @@ struct NoteEditorScreen: View {
                 VStack {
                     Spacer(minLength: topInset + 74)
 
-                    HStack {
+                    HStack(alignment: .center) {
                         toolRail
                             .opacity(controlsShouldHide ? 0.0 : 1.0)
                             .animation(.easeInOut(duration: 0.15), value: controlsShouldHide)
@@ -662,12 +662,23 @@ struct NoteEditorScreen: View {
             .padding(.vertical, outerPadLandscape)
 
             if !hideChrome {
-                sideBackButton
-                    .opacity(controlsShouldHide ? 0.0 : 1.0)
-                    .animation(.easeInOut(duration: 0.15), value: controlsShouldHide)
-                    .padding(.leading, 8)
-                    .padding(.top, topInset + 2)
-                    .zIndex(20)
+                HStack(spacing: 10) {
+                    sideBackButton
+
+                    if currentKind == .drawing {
+                        Text(titleText.isEmpty ? "Untitled" : titleText)
+                            .font(.system(size: 15, weight: .bold))
+                            .foregroundStyle(theme.palette.textPrimary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .frame(maxWidth: 180, alignment: .leading)
+                    }
+                }
+                .opacity(controlsShouldHide ? 0.0 : 1.0)
+                .animation(.easeInOut(duration: 0.15), value: controlsShouldHide)
+                .padding(.leading, 8)
+                .padding(.top, topInset + 2)
+                .zIndex(20)
 
                 HStack {
                     Spacer()
@@ -1139,13 +1150,10 @@ struct NoteEditorScreen: View {
 
             TextField("Title", text: $titleText)
                 .font(.system(size: 19, weight: .bold))
-                .padding(.horizontal, 12)
+                .padding(.leading, 6)
+                .padding(.trailing, 8)
                 .frame(height: 50)
-                .frame(minWidth: 120, maxWidth: .infinity, alignment: .leading)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 16)
-                        .stroke(p.outline, lineWidth: 1)
-                )
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .foregroundStyle(.black)
                 .shadow(color: .white.opacity(1.0), radius: 1.5, x: 0, y: 1)
                 .shadow(color: .black.opacity(0.18), radius: 3, x: 0, y: 1)
