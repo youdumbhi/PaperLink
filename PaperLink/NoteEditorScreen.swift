@@ -904,7 +904,7 @@ struct NoteEditorScreen: View {
             )
             .shadow(color: .black.opacity(0.18), radius: 10, x: 0, y: 4)
             .frame(maxWidth: 420)
-            .disabled(isLocked || readingMode)
+            .allowsHitTesting(!(isLocked || readingMode))
             .onSubmit {
                 guard let n = note, !readingMode, !isLocked else { return }
                 n.title = titleText
