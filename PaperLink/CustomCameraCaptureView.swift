@@ -95,7 +95,7 @@ struct CustomCameraCaptureView: View {
                         Spacer()
                         bottomBar
                     }
-                    .padding(.top, 8)
+                    .padding(.top, max(geo.safeAreaInsets.top, 8))
                     .padding(.bottom, 20)
                 }
             }
@@ -198,6 +198,13 @@ struct CustomCameraCaptureView: View {
     // MARK: - Top bar
 
     private var topBar: some View {
+        ViewThatFits(in: .horizontal) {
+            wideTopBar
+            compactTopBar
+        }
+    }
+
+    private var wideTopBar: some View {
         HStack(spacing: 12) {
             Button {
                 cleanupTempFiles()
@@ -217,6 +224,9 @@ struct CustomCameraCaptureView: View {
             Text(stage == .setCrop ? "Set Crop" : "Camera")
                 .font(.system(size: 16, weight: .bold))
                 .foregroundStyle(.white.opacity(0.92))
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+                .truncationMode(.tail)
 
             Spacer()
 
@@ -279,6 +289,85 @@ struct CustomCameraCaptureView: View {
             }
         }
         .padding(.horizontal, 14)
+    }
+
+    private var compactTopBar: some View {
+        HStack(spacing: 8) {
+            Button {
+                cleanupTempFiles()
+                dismiss()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 15, weight: .bold))
+                    .frame(width: 40, height: 40)
+                    .background(Color.black.opacity(0.35))
+                    .clipShape(RoundedRectangle(cornerRadius: 13))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.white)
+
+            Spacer(minLength: 0)
+
+            Text(stage == .setCrop ? "Set Crop" : "Camera")
+                .font(.system(size: 15, weight: .bold))
+                .foregroundStyle(.white.opacity(0.92))
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+                .truncationMode(.tail)
+
+            Spacer(minLength: 0)
+
+            if canShowDone {
+                Button {
+                    guard !isFinishingSession else { return }
+                    isFinishingSession = true
+                    let datas: [Data] = capturedURLs.compactMap { try? Data(contentsOf: $0) }
+                    onDone(datas)
+                    cleanupTempFiles()
+                    dismiss()
+                } label: {
+                    Text("Done")
+                        .font(.system(size: 14, weight: .bold))
+                        .padding(.horizontal, 12)
+                        .frame(height: 40)
+                        .background(Color.white.opacity(0.18))
+                        .clipShape(RoundedRectangle(cornerRadius: 13))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.white)
+                .disabled(isFinishingSession)
+            } else if stage == .capture {
+                Button {
+                    stage = .setCrop
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: useCrop ? "crop" : "crop.rotate")
+                        Text("Crop")
+                    }
+                    .font(.system(size: 13, weight: .bold))
+                    .padding(.horizontal, 10)
+                    .frame(height: 40)
+                    .background(Color.white.opacity(0.18))
+                    .clipShape(RoundedRectangle(cornerRadius: 13))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.white)
+            } else {
+                Button {
+                    stage = .capture
+                } label: {
+                    Text("Back")
+                        .font(.system(size: 14, weight: .bold))
+                        .padding(.horizontal, 12)
+                        .frame(height: 40)
+                        .background(Color.white.opacity(0.18))
+                        .clipShape(RoundedRectangle(cornerRadius: 13))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.white)
+            }
+        }
+        .padding(.horizontal, 12)
     }
 
     // MARK: - Bottom bar

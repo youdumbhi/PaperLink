@@ -257,9 +257,8 @@ struct FolderBrowserView: View {
 
     private func folderCard(_ folder: PLFolder) -> some View {
         let previewNote = previewNote(for: folder)
-        let childCount = liveFolders.filter { $0.parentFolderID == folder.id }.count
-        let noteCount = liveNotes.filter { $0.folderID == folder.id }.count
         let path = folderPath(for: folder)
+        let stats = folderCardStats(for: folder)
 
         return Button {
             withAnimation(.spring(response: 0.30, dampingFraction: 0.90)) {
@@ -267,44 +266,17 @@ struct FolderBrowserView: View {
                 query = ""
             }
         } label: {
-            ZStack(alignment: .bottomLeading) {
-                FolderCardSquare(folder: folder, previewNote: previewNote)
-                    .frame(height: isPhone ? 164 : 208)
-
-                VStack(alignment: .leading, spacing: 8) {
-                    if !path.isEmpty && path != folder.name {
-                        Text(path)
-                            .font(.system(size: 11, weight: .bold))
-                            .lineLimit(1)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .background(Color.black.opacity(0.24))
-                            .clipShape(Capsule())
-                    }
-
-                    HStack(spacing: 8) {
-                        statPill("\(childCount)", label: childCount == 1 ? "folder" : "folders")
-                        statPill("\(noteCount)", label: noteCount == 1 ? "note" : "notes")
-                    }
-                }
-                .padding(14)
-            }
+            FolderCardSquare(folder: folder, previewNote: previewNote, stats: stats, pathLabel: path)
+                .frame(height: isPhone ? 164 : 208)
         }
         .buttonStyle(.plain)
     }
 
-    private func statPill(_ value: String, label: String) -> some View {
-        HStack(spacing: 5) {
-            Text(value)
-                .font(.system(size: 12, weight: .heavy))
-            Text(label)
-                .font(.system(size: 11, weight: .bold))
-        }
-        .foregroundStyle(.white)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
-        .background(Color.black.opacity(0.28))
-        .clipShape(Capsule())
+    private func folderCardStats(for folder: PLFolder) -> FolderCardStats {
+        FolderCardStats(
+            folderCount: liveFolders.filter { $0.parentFolderID == folder.id }.count,
+            noteCount: liveNotes.filter { $0.folderID == folder.id }.count
+        )
     }
 
     private func previewNote(for folder: PLFolder) -> PLNote? {

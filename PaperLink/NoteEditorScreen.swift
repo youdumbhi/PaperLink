@@ -140,6 +140,21 @@ private struct PLNoteCanvasSizePreferenceKey: PreferenceKey {
     }
 }
 
+private struct TextSizePreset: Identifiable {
+    let id: String
+    let label: String
+    let shortLabel: String
+    let value: Double
+}
+
+private let plTextSizePresets: [TextSizePreset] = [
+    TextSizePreset(id: "xs", label: "Extra small", shortLabel: "XS", value: 14),
+    TextSizePreset(id: "s", label: "Small", shortLabel: "S", value: 16),
+    TextSizePreset(id: "m", label: "Medium", shortLabel: "M", value: 18),
+    TextSizePreset(id: "l", label: "Large", shortLabel: "L", value: 22),
+    TextSizePreset(id: "xl", label: "Extra large", shortLabel: "XL", value: 26)
+]
+
 struct NoteEditorScreen: View {
     @EnvironmentObject private var theme: PLThemeStore
     @AppStorage("pl_apple_pencil_only_draw") private var applePencilOnlyDraw: Bool = false
@@ -166,6 +181,7 @@ struct NoteEditorScreen: View {
     private let readingMode: Bool
     private let startInPreview: Bool
     private let hideChrome: Bool
+    private let newlyCreated: Bool
 
     // Preview/edit state
     @State private var isEditing: Bool = false
@@ -267,12 +283,13 @@ struct NoteEditorScreen: View {
     }
 
     // MARK: - Init
-    init(note: PLNote, readingMode: Bool = false, startInPreview: Bool = false, hideChrome: Bool = false) {
+    init(note: PLNote, readingMode: Bool = false, startInPreview: Bool = false, hideChrome: Bool = false, newlyCreated: Bool = false) {
         self.existingNote = note
         self.initialDraft = nil
         self.readingMode = readingMode
         self.startInPreview = startInPreview
         self.hideChrome = hideChrome
+        self.newlyCreated = newlyCreated
     }
 
     init(draft: PLNoteDraft) {
@@ -281,6 +298,7 @@ struct NoteEditorScreen: View {
         self.readingMode = false
         self.startInPreview = false
         self.hideChrome = false
+        self.newlyCreated = false
     }
 
     private var note: PLNote? { existingNote }
@@ -304,7 +322,7 @@ struct NoteEditorScreen: View {
     }
 
     private var usesCompactTopBar: Bool {
-        isPhone && !isPhoneLandscape
+        isPhone && currentKind != .text
     }
 
     // iPhone limitations:
@@ -452,7 +470,17 @@ struct NoteEditorScreen: View {
     }
 
     private var canvasDrawingPolicy: PKCanvasViewDrawingPolicy {
-        applePencilOnlyDraw ? .pencilOnly : .anyInput
+        if currentKind == .drawing {
+            return .pencilOnly
+        }
+        return applePencilOnlyDraw ? .pencilOnly : .anyInput
+    }
+
+    private var allowsFingerDrawingOnCanvas: Bool {
+        if currentKind == .drawing {
+            return false
+        }
+        return !applePencilOnlyDraw
     }
 
     private var selectedInkSwatchColor: Color {
@@ -466,8 +494,9 @@ struct NoteEditorScreen: View {
 
     private var drawWithFingerBinding: Binding<Bool> {
         Binding(
-            get: { !applePencilOnlyDraw },
+            get: { allowsFingerDrawingOnCanvas },
             set: { newValue in
+                guard currentKind != .drawing else { return }
                 applePencilOnlyDraw = !newValue
                 bumpDrawingPaletteActivity()
             }
@@ -506,6 +535,10 @@ struct NoteEditorScreen: View {
             .onAppear {
                 bootstrap()
                 if usesFloatingDrawingPalette {
+                    if UIDevice.current.userInterfaceIdiom == .pad && currentKind == .drawing {
+                        drawingPaletteSnapEdge = .leading
+                        drawingPaletteEdgeProgress = 0.5
+                    }
                     drawingPaletteExpanded = true
                     bumpDrawingPaletteActivity()
                 }
@@ -583,20 +616,15 @@ struct NoteEditorScreen: View {
 
             ZStack {
                 p.background.ignoresSafeArea()
-
-                if isPhoneLandscape {
-                    phoneLandscapeLayout(topInset: topInset)
-                } else {
-                    regularLayout(topInset: topInset)
-                }
+                regularLayout(topInset: topInset)
             }
         }
     }
 
     private var propertiesSheetContent: some View {
         PropertiesSheetLite(
-            note: note,
             kind: currentKind,
+            textFontSize: $textFontSize,
             drawingPaperStyle: $drawingPaperStyle,
             drawWidth: $drawWidth,
             markerWidth: $markerWidth,
@@ -615,8 +643,14 @@ struct NoteEditorScreen: View {
     // MARK: - Layouts
     private func regularLayout(topInset: CGFloat) -> some View {
         ZStack(alignment: .topLeading) {
-            noteCanvas
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            if currentKind == .text {
+                noteCanvas(topInset: topInset)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                noteCanvas(topInset: topInset)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .ignoresSafeArea()
+            }
 
             if !hideChrome {
                 if isPhone && (currentKind == .drawing || currentKind == .photo) {
@@ -694,8 +728,8 @@ struct NoteEditorScreen: View {
             }
             .buttonStyle(.plain)
         }
-        .padding(.top, topInset + 4)
-        .padding(.horizontal, 18)
+        .padding(.top, 4)
+        .padding(.horizontal, 14)
         .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
@@ -704,7 +738,7 @@ struct NoteEditorScreen: View {
             theme.palette.canvas
                 .ignoresSafeArea()
 
-            noteCanvas
+            noteCanvas(topInset: topInset)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(theme.palette.canvas.ignoresSafeArea())
                 .ignoresSafeArea()
@@ -764,11 +798,11 @@ struct NoteEditorScreen: View {
         .ignoresSafeArea()
     }
 
-    private var noteCanvas: some View {
+    private func noteCanvas(topInset: CGFloat) -> some View {
         let p = theme.palette
         let resolvedCanvasSize = noteCanvasSize == .zero ? UIScreen.main.bounds.size : noteCanvasSize
         let canvasFillStyle: AnyShapeStyle
-        let usesFullBleedCanvas = isPhoneLandscape || currentKind != .text
+        let usesFullBleedCanvas = currentKind != .text
 
         if currentKind == .text {
             canvasFillStyle = AnyShapeStyle(p.card)
@@ -809,6 +843,7 @@ struct NoteEditorScreen: View {
             if usesFloatingDrawingPalette {
                 FloatingDrawingPalette(
                     containerSize: resolvedCanvasSize,
+                    topChromeInset: topInset,
                     isExpanded: $drawingPaletteExpanded,
                     snapEdge: $drawingPaletteSnapEdge,
                     edgeProgress: $drawingPaletteEdgeProgress,
@@ -1065,8 +1100,6 @@ struct NoteEditorScreen: View {
 
     // MARK: - Bootstrap
     private func bootstrap() {
-        zoomResetToken += 1
-
         if let n = existingNote {
             titleText = n.title
             drawingPaperStyle = n.drawingPaperStyle
@@ -1168,12 +1201,14 @@ struct NoteEditorScreen: View {
             }
         }
         .padding(.horizontal, outerPadRegular)
-        .padding(.top, 2)
-        .padding(.bottom, 8)
+        .padding(.top, 0)
+        .padding(.bottom, 6)
         .overlay(alignment: .bottom) {
-            Rectangle()
-                .fill(theme.palette.outline.opacity(0.85))
-                .frame(height: 1)
+            if currentKind != .drawing {
+                Rectangle()
+                    .fill(theme.palette.outline.opacity(0.85))
+                    .frame(height: 1)
+            }
         }
     }
 
@@ -1221,16 +1256,13 @@ struct NoteEditorScreen: View {
 
             Spacer(minLength: 10)
 
-            if currentKind == .text {
-                textSizeControl
-            }
-
             if shouldShowRotate {
                 Button { rotate90() } label: {
                     Image(systemName: "rotate.right")
                         .font(.system(size: 18, weight: .bold))
                         .frame(width: 50, height: 50)
                         .background(p.railButton)
+                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                         .overlay(
                             RoundedRectangle(cornerRadius: 16)
                                 .stroke(p.outline, lineWidth: 1)
@@ -1245,6 +1277,7 @@ struct NoteEditorScreen: View {
                     .font(.system(size: 18, weight: .bold))
                     .frame(width: 50, height: 50)
                     .background(p.railButton)
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                     .overlay(
                         RoundedRectangle(cornerRadius: 16)
                             .stroke(p.outline, lineWidth: 1)
@@ -1260,6 +1293,7 @@ struct NoteEditorScreen: View {
                         .frame(height: 50)
                         .padding(.horizontal, 16)
                         .background(canCreateDraft ? p.accent : p.textPrimary.opacity(0.12))
+                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                         .overlay(
                             RoundedRectangle(cornerRadius: 16)
                                 .stroke(p.outline, lineWidth: 1)
@@ -1283,6 +1317,7 @@ struct NoteEditorScreen: View {
                                 .frame(height: 50)
                                 .padding(.horizontal, 16)
                                 .background(p.accent)
+                                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 16)
                                         .stroke(p.outline, lineWidth: 1)
@@ -1297,6 +1332,7 @@ struct NoteEditorScreen: View {
                                 .frame(height: 50)
                                 .padding(.horizontal, 16)
                                 .background(p.accent)
+                                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 16)
                                         .stroke(p.outline.opacity(0.8), lineWidth: 2)
@@ -1314,6 +1350,7 @@ struct NoteEditorScreen: View {
                         .font(.system(size: 18, weight: .bold))
                         .frame(width: 50, height: 50)
                         .background(p.railButton)
+                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                         .overlay(
                             RoundedRectangle(cornerRadius: 16)
                                 .stroke(p.outline, lineWidth: 1)
@@ -1333,6 +1370,7 @@ struct NoteEditorScreen: View {
                         .font(.system(size: 18, weight: .bold))
                         .frame(width: 50, height: 50)
                         .background(p.railButton)
+                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                         .overlay(
                             RoundedRectangle(cornerRadius: 16)
                                 .stroke(p.outline, lineWidth: 1)
@@ -1354,6 +1392,7 @@ struct NoteEditorScreen: View {
                         .font(.system(size: 17, weight: .bold))
                         .frame(width: 46, height: 46)
                         .background(p.textPrimary.opacity(0.88))
+                        .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
                         .foregroundStyle((p.textPrimary == .black ? Color.white : Color.black).opacity(0.92))
                 }
                 .buttonStyle(.plain)
@@ -1390,9 +1429,6 @@ struct NoteEditorScreen: View {
                     PaperLinkSyncManager.shared.enqueueNote(n, ctx: ctx)
                 }
 
-            if currentKind == .text {
-                textSizeControl
-            }
         }
     }
 
@@ -1401,16 +1437,17 @@ struct NoteEditorScreen: View {
         let p = theme.palette
 
         if isDraft {
-            Button { createDraftAndExit() } label: {
-                Image(systemName: "checkmark")
-                    .font(.system(size: 17, weight: .bold))
-                    .frame(width: 46, height: 46)
-                    .background(canCreateDraft ? p.accent : p.textPrimary.opacity(0.12))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 15)
-                            .stroke(p.outline, lineWidth: 1)
-                    )
-            }
+                Button { createDraftAndExit() } label: {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 17, weight: .bold))
+                        .frame(width: 46, height: 46)
+                        .background(canCreateDraft ? p.accent : p.textPrimary.opacity(0.12))
+                        .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 15)
+                                .stroke(p.outline, lineWidth: 1)
+                        )
+                }
             .buttonStyle(.plain)
             .foregroundStyle(.black)
             .disabled(!canCreateDraft)
@@ -1427,6 +1464,7 @@ struct NoteEditorScreen: View {
                         .font(.system(size: 17, weight: .bold))
                         .frame(width: 46, height: 46)
                         .background(p.accent)
+                        .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
                         .overlay(
                             RoundedRectangle(cornerRadius: 15)
                                 .stroke(p.outline, lineWidth: 1)
@@ -1440,6 +1478,7 @@ struct NoteEditorScreen: View {
                         .font(.system(size: 17, weight: .bold))
                         .frame(width: 46, height: 46)
                         .background(p.accent)
+                        .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
                         .overlay(
                             RoundedRectangle(cornerRadius: 15)
                                 .stroke(p.outline.opacity(0.8), lineWidth: 2)
@@ -1464,6 +1503,7 @@ struct NoteEditorScreen: View {
                         .font(.system(size: 17, weight: .bold))
                         .frame(width: 46, height: 46)
                         .background(p.railButton)
+                        .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
                         .overlay(
                             RoundedRectangle(cornerRadius: 15)
                                 .stroke(p.outline, lineWidth: 1)
@@ -1483,6 +1523,7 @@ struct NoteEditorScreen: View {
                 .font(.system(size: 17, weight: .bold))
                 .frame(width: 46, height: 46)
                 .background(p.railButton)
+                .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
                 .overlay(
                     RoundedRectangle(cornerRadius: 15)
                         .stroke(p.outline, lineWidth: 1)
@@ -1512,49 +1553,6 @@ struct NoteEditorScreen: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 4.0, execute: workItem)
     }
 
-    private var textSizeControl: some View {
-        let p = theme.palette
-
-        return HStack(spacing: 6) {
-            Button {
-                textFontSize = max(12, textFontSize - 1)
-            } label: {
-                Image(systemName: "textformat.size.smaller")
-                    .font(.system(size: 12, weight: .bold))
-                    .frame(width: 30, height: 30)
-                    .background(p.railButton)
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(p.textPrimary)
-
-            Text("\(Int(textFontSize))")
-                .font(.system(size: 13, weight: .heavy))
-                .foregroundStyle(p.textPrimary)
-                .frame(minWidth: 28)
-
-            Button {
-                textFontSize = min(30, textFontSize + 1)
-            } label: {
-                Image(systemName: "textformat.size.larger")
-                    .font(.system(size: 12, weight: .bold))
-                    .frame(width: 30, height: 30)
-                    .background(p.railButton)
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(p.textPrimary)
-        }
-        .padding(.horizontal, 8)
-        .frame(height: 38)
-        .background(p.card.opacity(0.9))
-        .clipShape(RoundedRectangle(cornerRadius: 14))
-        .overlay(
-            RoundedRectangle(cornerRadius: 14)
-                .stroke(p.outline, lineWidth: 1)
-        )
-    }
-
     private var headingTextFontSize: Double {
         max(textFontSize + 8, textFontSize * 1.35)
     }
@@ -1570,6 +1568,19 @@ struct NoteEditorScreen: View {
     }
 
     private func handleBackPressed() {
+        if newlyCreated {
+            if shouldDeleteNewNoteOnExit() {
+                deleteNewlyCreatedNoteAndDismiss()
+                return
+            }
+
+            if let n = note, !isLocked {
+                saveLayers(for: n)
+            }
+            dismiss()
+            return
+        }
+
         if isDraft { dismiss(); return }
         if readingMode { dismiss(); return }
 
@@ -1636,6 +1647,47 @@ struct NoteEditorScreen: View {
     private func saveAndExit() {
         guard let n = note else { dismiss(); return }
         saveLayers(for: n)
+        dismiss()
+    }
+
+    private func shouldDeleteNewNoteOnExit() -> Bool {
+        guard newlyCreated else { return false }
+
+        let trimmedTitle = titleText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let baselineTitle = snapshot?.title.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let hasMeaningfullyEditedTitle = !trimmedTitle.isEmpty && trimmedTitle != baselineTitle
+
+        switch currentKind {
+        case .text:
+            let body = textBodyFromBlocks(textBlocks).trimmingCharacters(in: .whitespacesAndNewlines)
+            return body.isEmpty && !hasMeaningfullyEditedTitle
+
+        case .drawing:
+            return !hasMarkupContent && !hasMeaningfullyEditedTitle
+
+        case .photo:
+            return false
+        }
+    }
+
+    private func deleteNewlyCreatedNoteAndDismiss() {
+        guard let n = note else {
+            dismiss()
+            return
+        }
+
+        if let filename = n.photoFilename {
+            FileStore.shared.delete(filename: filename)
+        }
+        if let filename = n.inkDrawingFilename {
+            FileStore.shared.delete(filename: filename)
+        }
+        if let filename = n.highlightDrawingFilename {
+            FileStore.shared.delete(filename: filename)
+        }
+
+        ctx.delete(n)
+        try? ctx.save()
         dismiss()
     }
 
@@ -2264,7 +2316,7 @@ struct NoteEditorScreen: View {
                 tool: toolForCurrentState(),
                 toolStateID: currentToolStateID(),
                 drawingPolicy: canvasDrawingPolicy,
-                allowsFingerDrawing: !applePencilOnlyDraw,
+                allowsFingerDrawing: allowsFingerDrawingOnCanvas,
                 isReadOnly: isLocked,
                 isInfiniteCanvas: true,
                 paperStyle: drawingPaperStyle,
@@ -2285,7 +2337,7 @@ struct NoteEditorScreen: View {
                 tool: toolForCurrentState(),
                 toolStateID: currentToolStateID(),
                 drawingPolicy: canvasDrawingPolicy,
-                allowsFingerDrawing: !applePencilOnlyDraw,
+                allowsFingerDrawing: allowsFingerDrawingOnCanvas,
                 isReadOnly: isLocked,
                 isInfiniteCanvas: true,
                 paperStyle: drawingPaperStyle,
@@ -2309,38 +2361,42 @@ struct NoteEditorScreen: View {
 #if canImport(UIKit)
             if let uiImage = currentPhotoUIImage() {
                 GeometryReader { geo in
-                    let fitted = fittedRect(imageSize: uiImage.size, in: geo.size)
-
-                    Image(uiImage: uiImage)
-                        .resizable()
-                        .scaledToFit()
-                        .frame(width: geo.size.width, height: geo.size.height)
-
+                    let filled = fillRect(imageSize: uiImage.size, in: geo.size)
                     let canEditOverlays = (!isLocked && !isPhone)
 
-                    PencilCanvasView(
-                        drawingData: $highlightData,
-                        tool: toolForCurrentState(highlightLayer: true),
-                        toolStateID: currentToolStateID(highlightLayer: true),
-                        drawingPolicy: canvasDrawingPolicy,
-                        allowsFingerDrawing: !applePencilOnlyDraw,
-                        isReadOnly: !(canEditOverlays && mode == .highlight)
-                    )
-                        .frame(width: fitted.size.width, height: fitted.size.height)
-                        .position(x: fitted.midX, y: fitted.midY)
-                        .allowsHitTesting(canEditOverlays && mode == .highlight)
+                    ZStack {
+                        Image(uiImage: uiImage)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: geo.size.width, height: geo.size.height)
+                            .clipped()
 
-                    PencilCanvasView(
-                        drawingData: $inkData,
-                        tool: toolForCurrentState(highlightLayer: false),
-                        toolStateID: currentToolStateID(highlightLayer: false),
-                        drawingPolicy: canvasDrawingPolicy,
-                        allowsFingerDrawing: !applePencilOnlyDraw,
-                        isReadOnly: !(canEditOverlays && mode == .ink)
-                    )
-                        .frame(width: fitted.size.width, height: fitted.size.height)
-                        .position(x: fitted.midX, y: fitted.midY)
-                        .allowsHitTesting(canEditOverlays && mode == .ink)
+                        PencilCanvasView(
+                            drawingData: $highlightData,
+                            tool: toolForCurrentState(highlightLayer: true),
+                            toolStateID: currentToolStateID(highlightLayer: true),
+                            drawingPolicy: canvasDrawingPolicy,
+                            allowsFingerDrawing: allowsFingerDrawingOnCanvas,
+                            isReadOnly: !(canEditOverlays && mode == .highlight)
+                        )
+                            .frame(width: filled.size.width, height: filled.size.height)
+                            .position(x: filled.midX, y: filled.midY)
+                            .allowsHitTesting(canEditOverlays && mode == .highlight)
+
+                        PencilCanvasView(
+                            drawingData: $inkData,
+                            tool: toolForCurrentState(highlightLayer: false),
+                            toolStateID: currentToolStateID(highlightLayer: false),
+                            drawingPolicy: canvasDrawingPolicy,
+                            allowsFingerDrawing: allowsFingerDrawingOnCanvas,
+                            isReadOnly: !(canEditOverlays && mode == .ink)
+                        )
+                            .frame(width: filled.size.width, height: filled.size.height)
+                            .position(x: filled.midX, y: filled.midY)
+                            .allowsHitTesting(canEditOverlays && mode == .ink)
+                    }
+                    .frame(width: geo.size.width, height: geo.size.height)
+                    .clipped()
                 }
             } else {
                 Text("No photo")
@@ -2704,17 +2760,21 @@ struct NoteEditorScreen: View {
     }
 
     // MARK: - Geometry helper
-    private func fittedRect(imageSize: CGSize, in container: CGSize) -> CGRect {
+    private func fillRect(imageSize: CGSize, in container: CGSize) -> CGRect {
         let imageAspect = imageSize.width / max(imageSize.height, 1)
         let containerAspect = container.width / max(container.height, 1)
 
         var size: CGSize
         if imageAspect > containerAspect {
-            size = CGSize(width: container.width, height: container.width / imageAspect)
-        } else {
             size = CGSize(width: container.height * imageAspect, height: container.height)
+        } else {
+            size = CGSize(width: container.width, height: container.width / imageAspect)
         }
-        let origin = CGPoint(x: (container.width - size.width) / 2, y: (container.height - size.height) / 2)
+
+        let origin = CGPoint(
+            x: (container.width - size.width) / 2,
+            y: (container.height - size.height) / 2
+        )
         return CGRect(origin: origin, size: size)
     }
 }
@@ -2725,6 +2785,7 @@ private struct FloatingDrawingPalette: View {
     @EnvironmentObject private var theme: PLThemeStore
 
     let containerSize: CGSize
+    let topChromeInset: CGFloat
     @Binding var isExpanded: Bool
     @Binding var snapEdge: PLDrawingPaletteSnapEdge
     @Binding var edgeProgress: CGFloat
@@ -2754,9 +2815,23 @@ private struct FloatingDrawingPalette: View {
         snapEdge == .leading || snapEdge == .trailing
     }
 
+    private var isPadPalette: Bool {
+        UIDevice.current.userInterfaceIdiom == .pad
+    }
+
+    private var allowedSnapEdges: [PLDrawingPaletteSnapEdge] {
+        isPadPalette ? [.leading, .trailing] : PLDrawingPaletteSnapEdge.allCases
+    }
+
+    private var preferredSnapEdge: PLDrawingPaletteSnapEdge {
+        isPadPalette ? .leading : .top
+    }
+
     private var baseExpandedPaletteSize: CGSize {
         if isVerticalDock {
-            return CGSize(width: 152, height: min(max(containerSize.height - 40, 292), 420))
+            let availableHeight = max(containerSize.height - topChromeInset - (outerInset * 2), 240)
+            let targetHeight = min(max(380, min(availableHeight, 500)), availableHeight)
+            return CGSize(width: 176, height: targetHeight)
         }
         return CGSize(width: min(max(containerSize.width - 28, 316), 460), height: 196)
     }
@@ -2764,6 +2839,9 @@ private struct FloatingDrawingPalette: View {
     private var paletteSize: CGSize {
         if isExpanded {
             return baseExpandedPaletteSize
+        }
+        if isPadPalette {
+            return CGSize(width: 72, height: 96)
         }
         return CGSize(width: 72, height: 72)
     }
@@ -2810,27 +2888,37 @@ private struct FloatingDrawingPalette: View {
     }
 
     private var paletteFill: Color {
-        Color.white.opacity(0.94)
+        theme.palette.card
     }
 
     private var paletteForeground: Color {
-        Color.black.opacity(0.82)
+        theme.palette.textPrimary
     }
 
     private var paletteSecondaryForeground: Color {
-        Color.black.opacity(0.42)
+        theme.palette.textSecondary
     }
 
     private var paletteDivider: Color {
-        Color.black.opacity(0.08)
+        theme.palette.outline
     }
 
     private var paletteButtonFill: Color {
-        Color.black.opacity(0.05)
+        switch theme.theme {
+        case .dusk, .graphite:
+            return Color.white.opacity(0.10)
+        default:
+            return theme.palette.textPrimary.opacity(0.09)
+        }
     }
 
     private var paletteButtonSelectedFill: Color {
-        Color.black.opacity(0.11)
+        switch theme.theme {
+        case .dusk, .graphite:
+            return theme.palette.accent.opacity(0.24)
+        default:
+            return theme.palette.accent.opacity(0.16)
+        }
     }
 
     private var paletteShape: RoundedRectangle {
@@ -2865,7 +2953,11 @@ private struct FloatingDrawingPalette: View {
     }
 
     private var snappedCenter: CGPoint {
-        center(for: snapEdge, progress: edgeProgress, paletteSize: paletteSize)
+        center(for: normalizedSnapEdge, progress: edgeProgress, paletteSize: paletteSize)
+    }
+
+    private var normalizedSnapEdge: PLDrawingPaletteSnapEdge {
+        allowedSnapEdges.contains(snapEdge) ? snapEdge : preferredSnapEdge
     }
 
     private var customColorBinding: Binding<Color> {
@@ -2887,6 +2979,10 @@ private struct FloatingDrawingPalette: View {
     }
 
     private func sanitizePalettePosition() {
+        if !allowedSnapEdges.contains(snapEdge) {
+            snapEdge = preferredSnapEdge
+            edgeProgress = 0.5
+        }
         let clampedCenter = clamped(center: currentCenter, paletteSize: paletteSize)
         let target = nearestSnapTarget(
             to: clampedCenter,
@@ -2957,7 +3053,7 @@ private struct FloatingDrawingPalette: View {
         )
         .overlay(
             paletteShape
-                .stroke(Color.black.opacity(0.06), lineWidth: 1)
+                .stroke(theme.palette.outline, lineWidth: 1)
         )
         .contentShape(paletteShape)
     }
@@ -3012,7 +3108,7 @@ private struct FloatingDrawingPalette: View {
     }
 
     private var verticalPaletteContent: some View {
-        VStack(spacing: 14) {
+        VStack(spacing: 12) {
             HStack(spacing: 10) {
                 paletteCircleButton(systemName: "arrow.uturn.backward", enabled: true) {
                     dismissActiveTextInput()
@@ -3036,7 +3132,7 @@ private struct FloatingDrawingPalette: View {
                 }
             }
 
-            LazyVGrid(columns: Array(repeating: GridItem(.flexible(minimum: 44, maximum: 52), spacing: 10), count: 2), spacing: 10) {
+            VStack(spacing: 8) {
                 ForEach([PLDrawTool.pen, .marker, .lasso, .eraser], id: \.self) { tool in
                     toolButton(for: tool)
                 }
@@ -3055,7 +3151,7 @@ private struct FloatingDrawingPalette: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .padding(.horizontal, 14)
+        .padding(.horizontal, 12)
         .padding(.bottom, 16)
     }
 
@@ -3083,7 +3179,7 @@ private struct FloatingDrawingPalette: View {
             }
             .overlay(
                 paletteShape
-                    .stroke(Color.black.opacity(0.06), lineWidth: 1)
+                    .stroke(theme.palette.outline, lineWidth: 1)
             )
             .shadow(color: .black.opacity(0.16), radius: 16, x: 0, y: 8)
         }
@@ -3129,7 +3225,7 @@ private struct FloatingDrawingPalette: View {
     private var dragHandle: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(Color.black.opacity(0.03))
+                .fill(theme.palette.textPrimary.opacity(0.04))
 
             Capsule()
                 .fill(paletteSecondaryForeground.opacity(0.22))
@@ -3186,15 +3282,31 @@ private struct FloatingDrawingPalette: View {
         Button {
             onSelectTool(tool)
         } label: {
-            VStack(spacing: 7) {
-                Image(systemName: iconName(for: tool))
-                    .font(.system(size: 18, weight: .semibold))
+            Group {
+                if isVerticalDock {
+                    HStack(spacing: 10) {
+                        Image(systemName: iconName(for: tool))
+                            .font(.system(size: 18, weight: .semibold))
 
-                Capsule()
-                    .fill(selectedTool == tool ? paletteForeground.opacity(0.88) : paletteSecondaryForeground.opacity(0.25))
-                    .frame(width: 20, height: 3)
+                        Capsule()
+                            .fill(selectedTool == tool ? paletteForeground.opacity(0.88) : paletteSecondaryForeground.opacity(0.25))
+                            .frame(width: 20, height: 3)
+
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 12)
+                } else {
+                    VStack(spacing: 7) {
+                        Image(systemName: iconName(for: tool))
+                            .font(.system(size: 18, weight: .semibold))
+
+                        Capsule()
+                            .fill(selectedTool == tool ? paletteForeground.opacity(0.88) : paletteSecondaryForeground.opacity(0.25))
+                            .frame(width: 20, height: 3)
+                    }
+                }
             }
-            .frame(width: 48, height: 52)
+            .frame(width: isVerticalDock ? 148 : 48, height: isVerticalDock ? 44 : 52)
             .background(
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
                     .fill(selectedTool == tool ? paletteButtonSelectedFill : Color.clear)
@@ -3208,9 +3320,9 @@ private struct FloatingDrawingPalette: View {
         let isSelected = selectedColor == color
         let ringColor: Color = {
             if !isSelected {
-                return color == .white ? Color.black.opacity(0.18) : Color.clear
+                return color == .white ? theme.palette.textPrimary.opacity(0.18) : theme.palette.outline
             }
-            return color == .black ? Color.white.opacity(0.95) : Color.black.opacity(0.90)
+            return color == .black ? Color.white.opacity(0.95) : theme.palette.textPrimary.opacity(0.90)
         }()
 
         return Button {
@@ -3245,9 +3357,9 @@ private struct FloatingDrawingPalette: View {
                 Circle()
                     .fill(selectedColor == .rainbow ? customColor : Color.white)
                     .overlay(
-                        Circle()
-                            .stroke(Color.black.opacity(selectedColor == .rainbow ? 0.90 : 0.12), lineWidth: selectedColor == .rainbow ? 3 : 1)
-                    )
+                Circle()
+                    .stroke(theme.palette.textPrimary.opacity(selectedColor == .rainbow ? 0.90 : 0.12), lineWidth: selectedColor == .rainbow ? 3 : 1)
+            )
 
                 Image(systemName: "plus")
                     .font(.system(size: 12, weight: .black))
@@ -3276,7 +3388,7 @@ private struct FloatingDrawingPalette: View {
         }
         .padding(18)
         .frame(width: 240, alignment: .leading)
-        .background(Color.white)
+        .background(paletteFill)
     }
 
     private var paletteDragGesture: some Gesture {
@@ -3337,7 +3449,7 @@ private struct FloatingDrawingPalette: View {
         let halfHeight = paletteSize.height * 0.5
         let minX = halfWidth + outerInset
         let maxX = max(minX, containerSize.width - halfWidth - outerInset)
-        let minY = halfHeight + outerInset
+        let minY = halfHeight + outerInset + topChromeInset
         let maxY = max(minY, containerSize.height - halfHeight - outerInset)
         return CGPoint(
             x: min(max(center.x, minX), maxX),
@@ -3351,7 +3463,7 @@ private struct FloatingDrawingPalette: View {
         let halfHeight = paletteSize.height * 0.5
         let minX = halfWidth + outerInset
         let maxX = max(minX, containerSize.width - halfWidth - outerInset)
-        let minY = halfHeight + outerInset
+        let minY = halfHeight + outerInset + topChromeInset
         let maxY = max(minY, containerSize.height - halfHeight - outerInset)
 
         switch edge {
@@ -3371,7 +3483,7 @@ private struct FloatingDrawingPalette: View {
         let halfHeight = paletteSize.height * 0.5
         let minX = halfWidth + outerInset
         let maxX = max(minX, containerSize.width - halfWidth - outerInset)
-        let minY = halfHeight + outerInset
+        let minY = halfHeight + outerInset + topChromeInset
         let maxY = max(minY, containerSize.height - halfHeight - outerInset)
 
         switch edge {
@@ -3387,15 +3499,23 @@ private struct FloatingDrawingPalette: View {
         let halfHeight = paletteSize.height * 0.5
         let minX = halfWidth + outerInset
         let maxX = max(minX, containerSize.width - halfWidth - outerInset)
-        let minY = halfHeight + outerInset
+        let minY = halfHeight + outerInset + topChromeInset
         let maxY = max(minY, containerSize.height - halfHeight - outerInset)
 
-        return [
-            .top: abs(center.y - minY),
-            .bottom: abs(center.y - maxY),
-            .leading: abs(center.x - minX),
-            .trailing: abs(center.x - maxX)
-        ]
+        var distances: [PLDrawingPaletteSnapEdge: CGFloat] = [:]
+        for edge in allowedSnapEdges {
+            switch edge {
+            case .top:
+                distances[.top] = abs(center.y - minY)
+            case .bottom:
+                distances[.bottom] = abs(center.y - maxY)
+            case .leading:
+                distances[.leading] = abs(center.x - minX)
+            case .trailing:
+                distances[.trailing] = abs(center.x - maxX)
+            }
+        }
+        return distances
     }
 
     private func breakoutDistance(from start: CGPoint, to center: CGPoint, edge: PLDrawingPaletteSnapEdge) -> CGFloat {
@@ -3462,8 +3582,8 @@ private struct PropertiesSheetLite: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var theme: PLThemeStore
 
-    let note: PLNote?
     let kind: PLNoteKind
+    @Binding var textFontSize: Double
     @Binding var drawingPaperStyle: PLDrawingPaperStyle
     @Binding var drawWidth: Double
     @Binding var markerWidth: Double
@@ -3497,17 +3617,7 @@ private struct PropertiesSheetLite: View {
                         propStepper("Pen width", value: $drawWidth, range: 1...24, suffix: "px")
                         propStepper("Marker width", value: $markerWidth, range: 4...36, suffix: "px")
                     } else {
-                        Text("Text size now lives in the top bar while you edit.")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(p.textSecondary)
-                            .padding(14)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(p.card.opacity(0.65))
-                            .clipShape(RoundedRectangle(cornerRadius: 18))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 18)
-                                    .stroke(p.outline, lineWidth: 1)
-                            )
+                        textSizeSection
                     }
                 }
                 .padding(.horizontal, 18)
@@ -3538,6 +3648,64 @@ private struct PropertiesSheetLite: View {
             DrawingPreferencesSheet()
                 .presentationDetents([.height(620), .large])
         }
+    }
+
+    private var textSizeSection: some View {
+        let p = theme.palette
+        let selectedPreset = plTextSizePresets.min { lhs, rhs in
+            abs(lhs.value - textFontSize) < abs(rhs.value - textFontSize)
+        } ?? plTextSizePresets[2]
+
+        return VStack(alignment: .leading, spacing: 10) {
+            Text("Text size")
+                .font(.system(size: 14, weight: .bold))
+                .foregroundStyle(p.textPrimary.opacity(0.85))
+
+            Text("Pick one of five presets. The preview sits on the right.")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(p.textSecondary)
+
+            VStack(spacing: 10) {
+                ForEach(plTextSizePresets) { preset in
+                    Button {
+                        textFontSize = preset.value
+                    } label: {
+                        HStack(spacing: 12) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(preset.label)
+                                    .font(.system(size: 14, weight: .bold))
+                                Text(preset.shortLabel)
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .opacity(0.75)
+                            }
+
+                            Spacer(minLength: 0)
+
+                            Text("Aa")
+                                .font(.system(size: preset.value, weight: .regular))
+                                .lineLimit(1)
+                        }
+                        .foregroundStyle(selectedPreset.id == preset.id ? p.background : p.textPrimary)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                        .background(selectedPreset.id == preset.id ? p.textPrimary.opacity(0.92) : p.railButton)
+                        .clipShape(RoundedRectangle(cornerRadius: 14))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 14)
+                                .stroke(p.outline, lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .padding(14)
+        .background(p.card.opacity(0.65))
+        .clipShape(RoundedRectangle(cornerRadius: 18))
+        .overlay(
+            RoundedRectangle(cornerRadius: 18)
+                .stroke(p.outline, lineWidth: 1)
+        )
     }
 
     private func propStepper(_ label: String, value: Binding<Double>, range: ClosedRange<Double>, suffix: String) -> some View {
