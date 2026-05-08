@@ -75,6 +75,7 @@ struct LibraryView: View {
     @Binding var deleteMode: Bool
 
     @State private var searchText: String = ""
+    @State private var showSearchSheet = false
 
     // Folder navigation (ID-based)
     @State private var currentFolderID: UUID? = nil
@@ -96,10 +97,7 @@ struct LibraryView: View {
     @State private var readingIndex: Int = 0
     @State private var readingFolderTitle: String = ""
 
-    // Draft creation presentation (new note)
-    @State private var creatingDraft: PLNoteDraft? = nil
-
-    // Editor presentation (existing note)
+    // Editor presentation
     @State private var editingNote: PLNote? = nil
 
     // "+" menu
@@ -139,7 +137,7 @@ struct LibraryView: View {
     @State private var pendingSingleTapWorkItem: DispatchWorkItem? = nil
     @State private var lastTapID: UUID? = nil
     @State private var lastTapDate: Date = .distantPast
-    private let doubleTapWindow: TimeInterval = 0.08
+    private let doubleTapWindow: TimeInterval = 0.18
 
     // Preview presentation (existing note)
     @State private var previewingNote: PLNote? = nil
@@ -150,7 +148,7 @@ struct LibraryView: View {
         case later
     }
 
-    private enum OrderedFolderContent: Identifiable {
+    fileprivate enum OrderedFolderContent: Identifiable {
         case folder(PLFolder)
         case note(PLNote)
 
@@ -160,6 +158,15 @@ struct LibraryView: View {
                 return "folder:\(folder.id.uuidString)"
             case .note(let note):
                 return "note:\(note.id.uuidString)"
+            }
+        }
+
+        var updatedAt: Date {
+            switch self {
+            case .folder(let folder):
+                return folder.updatedAt
+            case .note(let note):
+                return note.updatedAt
             }
         }
     }
@@ -235,8 +242,17 @@ struct LibraryView: View {
         scopedNotes.filter { $0.pinned }.sorted { $0.updatedAt > $1.updatedAt }
     }
 
-    private var recentNotes: [PLNote] {
-        Array(scopedNotes.sorted { $0.updatedAt > $1.updatedAt }.prefix(isPhoneCompact ? 8 : 12))
+    private var recentContents: [OrderedFolderContent] {
+        let items =
+            scopedFolders.map(OrderedFolderContent.folder)
+            + scopedNotes.map(OrderedFolderContent.note)
+
+        return items.sorted { lhs, rhs in
+            if lhs.updatedAt != rhs.updatedAt {
+                return lhs.updatedAt > rhs.updatedAt
+            }
+            return lhs.id < rhs.id
+        }
     }
 
     private var breadcrumbTitle: String {
@@ -282,7 +298,7 @@ struct LibraryView: View {
                                         columns: phoneGridColumns,
                                         canDrag: canModifyExisting,
                                         onOpen: { note in
-                                            Task { @MainActor in handleNoteTap(note) }
+                                            handleNoteTap(note)
                                         }
                                     )
                                 } else {
@@ -292,38 +308,33 @@ struct LibraryView: View {
                                         outline: p.outline,
                                         canDrag: canModifyExisting,
                                         onOpen: { note in
-                                            Task { @MainActor in handleNoteTap(note) }
+                                            handleNoteTap(note)
                                         }
                                     )
                                 }
                             }
 
-                            if !recentNotes.isEmpty {
+                            if !recentContents.isEmpty {
                                 SectionHeader(title: "Recents")
 
-                                if isPhoneCompact {
-                                    CompactNotesGrid(
-                                        notes: recentNotes,
-                                        cardSide: cardSide,
-                                        gridSpacing: gridSpacing,
-                                        outline: p.outline,
-                                        columns: phoneGridColumns,
-                                        canDrag: canModifyExisting,
-                                        onOpen: { note in
-                                            Task { @MainActor in handleNoteTap(note) }
-                                        }
-                                    )
-                                } else {
-                                    HorizontalPreviewRowSquare(
-                                        notes: recentNotes,
-                                        cardSide: cardSide,
-                                        outline: p.outline,
-                                        canDrag: canModifyExisting,
-                                        onOpen: { note in
-                                            Task { @MainActor in handleNoteTap(note) }
-                                        }
-                                    )
-                                }
+                                HorizontalPreviewRowMixed(
+                                    items: Array(recentContents.prefix(isPhoneCompact ? 10 : 12)),
+                                    cardSide: cardSide,
+                                    outline: p.outline,
+                                    canDrag: canModifyExisting,
+                                    folderPreviewNote: { folder in
+                                        folderPreviewNote(folderID: folder.id)
+                                    },
+                                    folderCardStats: { folder in
+                                        folderCardStats(for: folder)
+                                    },
+                                    onOpenNote: { note in
+                                        handleNoteTap(note)
+                                    },
+                                    onOpenFolder: { folder in
+                                        handleFolderTap(folder)
+                                    }
+                                )
                             }
 
                             if !scopedFolders.isEmpty {
@@ -338,7 +349,7 @@ struct LibraryView: View {
                                 notesGrid
                             }
 
-                            if pinnedNotes.isEmpty, recentNotes.isEmpty, scopedFolders.isEmpty, scopedNotes.isEmpty {
+                            if pinnedNotes.isEmpty, recentContents.isEmpty, scopedFolders.isEmpty, scopedNotes.isEmpty {
                                 emptyStateView
                             }
                         }
@@ -357,15 +368,13 @@ struct LibraryView: View {
         // If we go offline mid-session, close any destructive/modifying UI.
         .onChange(of: network.isOnline) { _, isOnline in
             if !isOnline {
-                Task { @MainActor in
-                    closeMenu()
-                    showMoveToFolderSheet = false
-                    showTrashSlider = false
-                    pendingTrashFolder = nil
-                    pendingTrashNote = nil
-                    pendingNoteToMove = nil
-                    pendingNoteForFolder = nil
-                }
+                closeMenu()
+                showMoveToFolderSheet = false
+                showTrashSlider = false
+                pendingTrashFolder = nil
+                pendingTrashNote = nil
+                pendingNoteToMove = nil
+                pendingNoteForFolder = nil
             }
         }
 
@@ -406,13 +415,17 @@ struct LibraryView: View {
         }
 
         // Existing note: open PREVIEW first
-        .fullScreenCover(item: $previewingNote) { note in
+        .fullScreenCover(item: $previewingNote, onDismiss: {
+            previewingNote = nil
+        }) { note in
             NoteEditorScreen(note: note, startInPreview: true)
         }
 
-        // Draft editor
-        .fullScreenCover(item: $creatingDraft) { draft in
-            NoteEditorScreen(draft: draft)
+        // New note editor: created immediately, opened directly
+        .fullScreenCover(item: $editingNote, onDismiss: {
+            editingNote = nil
+        }) { note in
+            NoteEditorScreen(note: note, startInPreview: false, newlyCreated: true)
         }
 
         // Reading mode
@@ -431,11 +444,11 @@ struct LibraryView: View {
                 showDrawingOption: !isPhoneCompact, // iPhone: no drawing note creation
                 onNewText: {
                     showNewItemSheet = false
-                    creatingDraft = PLNoteDraft(kind: .text, title: "New note", folderID: currentFolderID)
+                    createImmediateTextNote()
                 },
                 onNewDrawing: {
                     showNewItemSheet = false
-                    creatingDraft = PLNoteDraft(kind: .drawing, title: "New drawing", folderID: currentFolderID)
+                    createImmediateDrawingNote()
                 },
                 onImportPhotos: {
                     showNewItemSheet = false
@@ -520,11 +533,16 @@ struct LibraryView: View {
                 cardSide: cardSide,
                 gridSpacing: gridSpacing,
                 onOpen: { note in
-                    Task { @MainActor in handleNoteTap(note) }
+                    handleNoteTap(note)
                 }
             )
             .presentationBackground(theme.palette.background)
             .presentationCornerRadius(24)
+        }
+
+        // Search popup on compact phones
+        .sheet(isPresented: $showSearchSheet) {
+            searchSheet
         }
 
         // Trash slider
@@ -546,6 +564,39 @@ struct LibraryView: View {
             )
                 .modifier(CompactDetentsIfAvailable(height: 520))
         }
+    }
+
+    private var searchSheet: some View {
+        let p = theme.palette
+
+        return VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 12) {
+                Text("Search")
+                    .font(.system(size: 20, weight: .heavy))
+                    .foregroundStyle(p.textPrimary)
+
+                Spacer()
+
+                Button("Done") {
+                    showSearchSheet = false
+                }
+                .font(.system(size: 15, weight: .bold))
+                .foregroundStyle(p.textPrimary)
+            }
+
+            SearchPill(text: $searchText, showsPromptText: true, autoFocus: true)
+                .frame(maxWidth: .infinity)
+
+            Text("Search titles and note text.")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(p.textSecondary)
+
+            Spacer(minLength: 0)
+        }
+        .padding(16)
+        .background(p.background.ignoresSafeArea())
+        .modifier(CompactDetentsIfAvailable(height: 220))
+        .presentationBackground(p.background)
     }
 
     // MARK: - Trash slider (extracted as full function to keep body clean)
@@ -579,30 +630,54 @@ struct LibraryView: View {
     private var headerBar: some View {
         let p = theme.palette
 
-        let btnW: CGFloat = isPhoneCompact ? 48 : 54
+        let btnW: CGFloat = isPhoneCompact ? 62 : 68
         let btnH: CGFloat = isPhoneCompact ? 48 : 54
 
         return HStack(spacing: isPhoneCompact ? 10 : 14) {
 
             // RootView now owns the menu button; this spacer preserves header alignment.
             Spacer()
-                .frame(width: (contentLeadingInset > 0 ? 0 : btnW), height: btnH)
+                .frame(width: (contentLeadingInset > 0 ? 0 : btnW + 8), height: btnH)
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("Paperlink")
-                    .font(.system(size: isPhoneCompact ? 24 : 28, weight: .bold))
+                Text("PaperLink")
+                    .font(.system(size: isPhoneCompact ? 22 : 28, weight: .bold))
                     .foregroundStyle(p.textPrimary)
-
-                Text("Your notes, organized.")
-                    .font(.system(size: isPhoneCompact ? 12 : 14, weight: .semibold))
-                    .foregroundStyle(p.textSecondary)
                     .lineLimit(1)
+                    .minimumScaleFactor(0.86)
+                    .layoutPriority(1)
+
+                if !isPhoneCompact {
+                    Text("Your notes, organized.")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(p.textSecondary)
+                        .lineLimit(1)
+                }
             }
 
             Spacer()
 
-            SearchPill(text: $searchText)
-                .frame(maxWidth: isPhoneCompact ? 190 : 420)
+            if isPhoneCompact {
+                Button {
+                    showSearchSheet = true
+                } label: {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 18, weight: .bold))
+                        .frame(width: 48, height: 48)
+                        .background(p.railButton)
+                        .clipShape(RoundedRectangle(cornerRadius: 16))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 16)
+                                .stroke(p.outline, lineWidth: 1)
+                        )
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(p.textPrimary)
+                .accessibilityLabel("Search notes")
+            } else {
+                SearchPill(text: $searchText, showsPromptText: true)
+                    .frame(maxWidth: 420)
+            }
 
             Button { showNewItemSheet = true } label: {
                 if isPhoneCompact {
@@ -697,19 +772,16 @@ struct LibraryView: View {
         return LazyVGrid(columns: cols, alignment: .leading, spacing: gridSpacing) {
             ForEach(scopedFolders) { folder in
                 let previewNote = folderPreviewNote(folderID: folder.id)
+                let stats = folderCardStats(for: folder)
 
-                FolderCardSquare(folder: folder, previewNote: previewNote)
+                FolderCardSquare(folder: folder, previewNote: previewNote, stats: stats, pathLabel: nil)
                     .frame(width: cardSide, height: cardSide)
                     .contentShape(RoundedRectangle(cornerRadius: 26))
-                    .onTapGesture {
-                        Task { @MainActor in
-                            handleFolderTap(folder)
-                        }
-                    }
+                    .onTapGesture { handleFolderTap(folder) }
                     .plIf(canModifyExisting) { view in
                         view.draggable(dragStringForFolder(folder.id)) {
                             DragPreviewCard(outline: theme.palette.outline) {
-                                FolderCardSquare(folder: folder, previewNote: previewNote)
+                                FolderCardSquare(folder: folder, previewNote: previewNote, stats: stats, pathLabel: nil)
                                     .environmentObject(theme) // ✅ IMPORTANT: inject theme into preview
                                     .frame(width: cardSide, height: cardSide)
                             }
@@ -780,11 +852,7 @@ struct LibraryView: View {
                 NoteCardSquare(note: note)
                     .frame(width: cardSide, height: cardSide)
                     .contentShape(RoundedRectangle(cornerRadius: 26))
-                    .onTapGesture {
-                        Task { @MainActor in
-                            handleNoteTap(note)
-                        }
-                    }
+                    .onTapGesture { handleNoteTap(note) }
                     .plIf(canModifyExisting) { view in
                         view.draggable(dragStringForNote(note.id))
                     }
@@ -799,21 +867,17 @@ struct LibraryView: View {
         case .folder(let folder):
             let previewNote = folderPreviewNote(folderID: folder.id)
 
-            FolderCardSquare(folder: folder, previewNote: previewNote)
+            FolderCardSquare(folder: folder, previewNote: previewNote, stats: nil, pathLabel: nil)
                 .frame(width: cardSide, height: cardSide)
                 .overlay(alignment: .topTrailing) {
                     orderBadge(number: index + 1)
                 }
                 .contentShape(RoundedRectangle(cornerRadius: 26))
-                .onTapGesture {
-                    Task { @MainActor in
-                        handleFolderTap(folder)
-                    }
-                }
+                .onTapGesture { handleFolderTap(folder) }
                 .plIf(canModifyExisting) { view in
                     view.draggable(dragStringForFolder(folder.id)) {
                         DragPreviewCard(outline: theme.palette.outline) {
-                            FolderCardSquare(folder: folder, previewNote: previewNote)
+                            FolderCardSquare(folder: folder, previewNote: previewNote, stats: nil, pathLabel: nil)
                                 .environmentObject(theme)
                                 .frame(width: cardSide, height: cardSide)
                         }
@@ -863,11 +927,7 @@ struct LibraryView: View {
                     orderBadge(number: index + 1)
                 }
                 .contentShape(RoundedRectangle(cornerRadius: 26))
-                .onTapGesture {
-                    Task { @MainActor in
-                        handleNoteTap(note)
-                    }
-                }
+                .onTapGesture { handleNoteTap(note) }
                 .plIf(canModifyExisting) { view in
                     view.draggable(dragStringForNote(note.id))
                 }
@@ -962,14 +1022,12 @@ struct LibraryView: View {
 
         pendingSingleTapWorkItem?.cancel()
 
-        let openDelay: TimeInterval = 0.05
-
         let work = DispatchWorkItem { @MainActor in
             openEditor(note) // opens PREVIEW
         }
 
         pendingSingleTapWorkItem = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + doubleTapWindow + openDelay, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + doubleTapWindow, execute: work)
     }
 
     @MainActor
@@ -1123,6 +1181,80 @@ struct LibraryView: View {
     }
 
     @MainActor
+    private func presentNewNote(_ note: PLNote) {
+        previewingNote = nil
+        DispatchQueue.main.async {
+            self.editingNote = note
+        }
+    }
+
+    @MainActor
+    private func createImmediateTextNote() {
+        createImmediateNote(title: "New note", kind: .text)
+    }
+
+    @MainActor
+    private func createImmediateDrawingNote() {
+        createImmediateNote(title: "New drawing", kind: .drawing)
+    }
+
+    @MainActor
+    private func createImmediatePhotoNote(photoData: Data) {
+        createImmediateNote(title: "Photo note", kind: .photo, photoData: photoData)
+    }
+
+    @MainActor
+    private func createImmediateNote(title: String, kind: PLNoteKind, photoData: Data? = nil) {
+        let note = PLNote(
+            title: title,
+            kind: kind,
+            folderID: currentFolderID,
+            readingOrder: nextReadingOrder(in: currentFolderID)
+        )
+
+        switch kind {
+        case .text:
+            break
+
+        case .drawing:
+            guard let inkFilename = FileStore.shared.writeData(PKDrawing().dataRepresentation(), preferredName: "drawing.pkd") else {
+                return
+            }
+            note.inkDrawingFilename = inkFilename
+
+        case .photo:
+            guard let photoData, !photoData.isEmpty else { return }
+            guard let photoFilename = FileStore.shared.writeData(photoData, preferredName: "photo.jpg") else {
+                return
+            }
+
+            let blank = PKDrawing().dataRepresentation()
+            guard let inkFilename = FileStore.shared.writeData(blank, preferredName: "ink.pkd") else {
+                FileStore.shared.delete(filename: photoFilename)
+                return
+            }
+            guard let highlightFilename = FileStore.shared.writeData(blank, preferredName: "highlight.pkd") else {
+                FileStore.shared.delete(filename: photoFilename)
+                FileStore.shared.delete(filename: inkFilename)
+                return
+            }
+
+            note.photoFilename = photoFilename
+            note.inkDrawingFilename = inkFilename
+            note.highlightDrawingFilename = highlightFilename
+        }
+
+        ctx.insert(note)
+        try? ctx.save()
+
+        if kind == .photo {
+            PaperLinkSyncManager.shared.enqueueNote(note, ctx: ctx)
+        }
+
+        presentNewNote(note)
+    }
+
+    @MainActor
     private func createFolder(name: String, parentID: UUID?) {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let finalName = trimmed.isEmpty ? autoFolderName(parentID: parentID) : trimmed
@@ -1247,12 +1379,7 @@ struct LibraryView: View {
         guard !cleaned.isEmpty else { return }
 
         if cleaned.count == 1, let data = cleaned.first {
-            creatingDraft = PLNoteDraft(
-                kind: .photo,
-                title: "Photo note",
-                folderID: currentFolderID,
-                photoData: data
-            )
+            createImmediatePhotoNote(photoData: data)
         } else {
             pendingMultiPhotoDatas = cleaned
             multiPhotoFolderName = ""
@@ -1365,6 +1492,13 @@ struct LibraryView: View {
             .filter { $0.folderID == folderID }
             .sorted { $0.updatedAt > $1.updatedAt }
         return notes.first
+    }
+
+    private func folderCardStats(for folder: PLFolder) -> FolderCardStats {
+        FolderCardStats(
+            folderCount: aliveFolders.filter { $0.parentFolderID == folder.id }.count,
+            noteCount: aliveNotes.filter { $0.folderID == folder.id }.count
+        )
     }
 
     @ViewBuilder
@@ -1671,6 +1805,8 @@ struct SearchPill: View {
     @EnvironmentObject private var theme: PLThemeStore
 
     @Binding var text: String
+    var showsPromptText: Bool = true
+    var autoFocus: Bool = false
     @FocusState private var focused: Bool
 
     var body: some View {
@@ -1681,11 +1817,12 @@ struct SearchPill: View {
                 .font(.system(size: 16, weight: .bold))
                 .foregroundStyle(p.textSecondary.opacity(0.95))
 
-            TextField("Search notes", text: $text)
+            TextField(showsPromptText ? "Search notes" : "", text: $text)
                 .textFieldStyle(.plain)
                 .submitLabel(.search)
                 .focused($focused)
                 .foregroundStyle(p.textPrimary)
+                .accessibilityLabel("Search notes")
 
             if !text.isEmpty {
                 Button {
@@ -1707,6 +1844,12 @@ struct SearchPill: View {
                 .stroke(p.outline, lineWidth: 1)
         )
         .onTapGesture { focused = true }
+        .onAppear {
+            guard autoFocus else { return }
+            DispatchQueue.main.async {
+                focused = true
+            }
+        }
     }
 }
 
@@ -1875,6 +2018,69 @@ struct HorizontalPreviewRowSquare: View {
     }
 }
 
+fileprivate struct HorizontalPreviewRowMixed: View {
+    @EnvironmentObject private var theme: PLThemeStore
+
+    let items: [LibraryView.OrderedFolderContent]
+    let cardSide: CGFloat
+    let outline: Color
+    let canDrag: Bool
+    let folderPreviewNote: (PLFolder) -> PLNote?
+    let folderCardStats: (PLFolder) -> FolderCardStats
+    let onOpenNote: (PLNote) -> Void
+    let onOpenFolder: (PLFolder) -> Void
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 12) {
+                ForEach(items) { item in
+                    switch item {
+                    case .folder(let folder):
+                        let previewNote = folderPreviewNote(folder)
+                        let stats = folderCardStats(folder)
+
+                        FolderCardSquare(folder: folder, previewNote: previewNote, stats: stats, pathLabel: nil)
+                            .frame(width: cardSide, height: cardSide)
+                            .contentShape(RoundedRectangle(cornerRadius: 26))
+                            .onTapGesture { onOpenFolder(folder) }
+                            .plIf(canDrag) { view in
+                                view.draggable("folder:\(folder.id.uuidString)") {
+                                    DragPreviewCard(outline: outline) {
+                                        FolderCardSquare(folder: folder, previewNote: previewNote, stats: stats, pathLabel: nil)
+                                            .environmentObject(theme)
+                                            .frame(width: cardSide, height: cardSide)
+                                    }
+                                }
+                            }
+
+                    case .note(let note):
+                        NoteCardSquare(note: note)
+                            .frame(width: cardSide, height: cardSide)
+                            .contentShape(RoundedRectangle(cornerRadius: 26))
+                            .onTapGesture { onOpenNote(note) }
+                            .plIf(canDrag) { view in
+                                view.draggable("note:\(note.id.uuidString)") {
+                                    DragPreviewCard(outline: outline) {
+                                        NoteCardSquare(note: note)
+                                            .environmentObject(theme)
+                                            .frame(width: cardSide, height: cardSide)
+                                    }
+                                }
+                            }
+                    }
+                }
+            }
+            .padding(.horizontal, 2)
+        }
+        .frame(height: cardSide + 8)
+    }
+}
+
+struct FolderCardStats {
+    let folderCount: Int
+    let noteCount: Int
+}
+
 // MARK: - Folder Card
 
 struct FolderCardSquare: View {
@@ -1882,52 +2088,115 @@ struct FolderCardSquare: View {
 
     let folder: PLFolder
     let previewNote: PLNote?
+    let stats: FolderCardStats?
+    let pathLabel: String?
 
     var body: some View {
-        let p = theme.palette
+        GeometryReader { geo in
+            let p = theme.palette
 
-        ZStack(alignment: .topLeading) {
-            RoundedRectangle(cornerRadius: 26)
-                .fill(p.card)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 26)
-                        .stroke(p.outline, lineWidth: 1)
-                )
+            ZStack(alignment: .topLeading) {
+                RoundedRectangle(cornerRadius: 26)
+                    .fill(p.card)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 26)
+                            .stroke(p.outline, lineWidth: 1)
+                    )
 
-            if let previewNote {
-                CardBackground(note: previewNote)
-                    .clipShape(RoundedRectangle(cornerRadius: 26))
-            }
-
-            LinearGradient(
-                colors: [Color.black.opacity(0.08), Color.black.opacity(0.55)],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 26))
-
-            VStack(alignment: .leading, spacing: 10) {
-                HStack {
-                    Image(systemName: "folder.fill")
-                        .font(.system(size: 22, weight: .bold))
-                        .padding(9)
-                        .background(Color.black.opacity(0.28))
-                        .clipShape(RoundedRectangle(cornerRadius: 14))
-                    Spacer()
+                if let previewNote {
+                    CardBackground(note: previewNote)
+                        .clipShape(RoundedRectangle(cornerRadius: 26))
                 }
 
-                Spacer()
+                LinearGradient(
+                    colors: [Color.black.opacity(0.08), Color.black.opacity(0.55)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 26))
 
-                Text(folder.name)
-                    .font(.system(size: 15, weight: .bold)) // ✅ tuned
-                    .lineLimit(2)
-                    .minimumScaleFactor(0.85)               // ✅ tuned
-                    .shadow(radius: 6)
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(alignment: .top, spacing: 10) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Image(systemName: "folder.fill")
+                                .font(.system(size: 22, weight: .bold))
+                                .padding(9)
+                                .background(Color.black.opacity(0.28))
+                                .clipShape(RoundedRectangle(cornerRadius: 14))
+
+                            if let pathLabel, !pathLabel.isEmpty, pathLabel != folder.name {
+                                Text(pathLabel)
+                                    .font(.system(size: 10, weight: .bold))
+                                    .lineLimit(1)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 5)
+                                    .background(Color.black.opacity(0.24))
+                                    .clipShape(Capsule())
+                            }
+                        }
+
+                        Spacer(minLength: 8)
+
+#if targetEnvironment(macCatalyst)
+                        let isCompactStats = min(geo.size.width, geo.size.height) < 156
+                        if let stats {
+                            if isCompactStats {
+                                HStack(spacing: 6) {
+                                    compactStatBadge(systemImage: "folder.fill", value: stats.folderCount)
+                                    compactStatBadge(systemImage: "doc.text.fill", value: stats.noteCount)
+                                }
+                            } else {
+                                VStack(alignment: .trailing, spacing: 6) {
+                                    statPill("\(stats.folderCount)", label: stats.folderCount == 1 ? "folder" : "folders")
+                                    statPill("\(stats.noteCount)", label: stats.noteCount == 1 ? "note" : "notes")
+                                }
+                            }
+                        }
+#endif
+                    }
+
+                    Spacer()
+
+                    Text(folder.name)
+                        .font(.system(size: 15, weight: .bold)) // ✅ tuned
+                        .lineLimit(2)
+                        .minimumScaleFactor(0.85)               // ✅ tuned
+                        .shadow(radius: 6)
+                }
+                .foregroundStyle(.white)
+                .padding(14)
             }
-            .foregroundStyle(.white)
-            .padding(14)
+            .clipped()
         }
-        .clipped()
+    }
+
+    private func compactStatBadge(systemImage: String, value: Int) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: systemImage)
+                .font(.system(size: 8.5, weight: .bold))
+            Text("\(value)")
+                .font(.system(size: 10, weight: .heavy))
+                .monospacedDigit()
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 7)
+        .padding(.vertical, 5)
+        .background(Color.black.opacity(0.30))
+        .clipShape(Capsule())
+    }
+
+    private func statPill(_ value: String, label: String) -> some View {
+        HStack(spacing: 4) {
+            Text(value)
+                .font(.system(size: 11, weight: .heavy))
+            Text(label)
+                .font(.system(size: 10, weight: .bold))
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 6)
+        .background(Color.black.opacity(0.28))
+        .clipShape(Capsule())
     }
 }
 

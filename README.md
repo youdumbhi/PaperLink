@@ -1,145 +1,105 @@
 # PaperLink
 
-PaperLink is an iOS-first notes app built with SwiftUI, SwiftData, PencilKit, Firebase Auth, and a custom HTTP sync layer. It supports three note kinds:
+PaperLink is a local-first notes app for iPhone, iPad, and Mac Catalyst built with SwiftUI, SwiftData, PencilKit, Firebase Auth, Google Sign-In, and a custom HTTP sync backend.
+
+It supports three note kinds:
 
 - `text`
 - `photo`
 - `drawing`
 
-The app uses local-first storage and then syncs folders/notes/files to a remote service.
+## Features
 
-## High-Level Architecture
+- Folder hierarchy with pinned notes and recents
+- Soft delete and a sync-backed trash flow
+- Theme switching
+- Camera capture and photo import
+- PencilKit drawing with custom tools, paper styles, and an infinite canvas
+- Separate ink and highlight layers for photo notes
+- Local-first storage with background sync to a remote service
+- Offline restrictions that still allow creating new content locally
 
-- App entry: `PaperLink/PaperLinkApp.swift`
-  - Boots Firebase.
-  - Creates a single shared SwiftData `ModelContainer`.
-  - Configures `PaperLinkSyncManager` with the production server URL.
-  - Injects `PLThemeStore`, `PLAuthStore`, and `NetworkMonitor`.
+## Project Layout
 
-- Root shell: `PaperLink/RootView.swift`
-  - Handles auth gating, theme selection, network state, sidebar, and top-level navigation.
-  - Hosts `LibraryView`, `InfoView`, trash/settings tabs, and sign-in flow.
+- `PaperLink/PaperLinkApp.swift`: app entry point, Firebase bootstrap, SwiftData container, sync setup, and sync heartbeat
+- `PaperLink/RootView.swift`: auth gate, sidebar shell, top-level navigation, settings, and offline banner
+- `PaperLink/LibraryView.swift`: library browser, folder/note creation flows, drag and drop, reading mode, photo import, and camera entry points
+- `PaperLink/FolderBrowserView.swift`: folder-only browser view
+- `PaperLink/InfoView.swift`: workspace info and usage stats
+- `PaperLink/PinnedNotesSheet.swift`: pinned notes sheet
+- `PaperLink/NoteEditorScreen.swift`: editor for text, photo, and drawing notes
+- `PaperLink/PencilCanvasView.swift`: PencilKit wrapper and infinite canvas behavior
+- `PaperLink/CustomCameraCaptureView.swift`: in-app camera capture
+- `PaperLink/FileStore.swift`: file-backed media storage in `Documents/PaperlinkFiles`
+- `PaperLink/Models.swift`: SwiftData models and local defaults
+- `PaperLink/SyncModels.swift`: sync payload DTOs
+- `PaperLink/PaperLinkSyncManager.swift`: local queue, sync orchestration, reconciliation, and purge handling
+- `PaperLink/PaperLinkSyncClient.swift`: HTTP client for the backend API
+- `PaperLink/PLPendingUpload.swift`: deferred sync queue row
+- `paperlink_server_hardened.txt`: backend reference snapshot, not app code
 
-- Main library UI: `PaperLink/LibraryView.swift`
-  - Shows folders, pinned notes, recents, and creation flows.
-  - Opens existing notes in `NoteEditorScreen`.
-  - Creates new drafts via `PLNoteDraft`.
-  - Contains drag/drop, anchored menus, reading mode, and camera/photo import flows.
-
-- Note editor: `PaperLink/NoteEditorScreen.swift`
-  - Single editor for all note kinds.
-  - Text notes: structured block-based editor.
-  - Photo notes: image plus separate ink/highlight overlay layers.
-  - Drawing notes: infinite PencilKit canvas with custom floating palette.
-
-- PencilKit wrapper: `PaperLink/PencilCanvasView.swift`
-  - Wraps `PKCanvasView`.
-  - Supports plain and infinite canvas modes.
-  - Adds a custom overlay for lined/dot-grid paper.
-  - This is the main file to inspect for drawing latency, Pencil issues, zoom, and gesture conflicts.
-
-- Local file storage: `PaperLink/FileStore.swift`
-  - Stores photo files and `.pkd` drawing data under Documents/`PaperlinkFiles`.
-  - SwiftData models store filenames, not blobs.
-
-- Sync engine: `PaperLink/PaperLinkSyncManager.swift`
-  - Local upload queue based on `PLPendingUpload`.
-  - Pushes folders/notes/files via `PaperLinkSyncClient`.
-  - Pulls remote changes and reconciles them back into SwiftData.
-
-- Sync client and payloads:
-  - `PaperLink/PaperLinkSyncClient.swift`
-  - `PaperLink/SyncModels.swift`
-  - `paperlink_server_hardened.txt` is a server-side reference snapshot, not app code.
-
-## Local Data Model
-
-Defined in `PaperLink/Models.swift`.
+## Data Model
 
 - `PLFolder`
-  - Hierarchical folder tree via `parentFolderID`.
-  - Soft delete via `deletedAt`.
-  - Shared media rotation via `mediaRotationQuarterTurns`.
-  - Display ordering via `readingOrder`.
-
+  - Folder tree via `parentFolderID`
+  - Soft delete via `deletedAt`
+  - Folder-wide media rotation via `mediaRotationQuarterTurns`
+  - Reading order via `readingOrder`
 - `PLNote`
-  - `kindRaw` maps to `PLNoteKind`.
-  - Optional payload per kind:
-    - `textBody`
-    - `photoFilename`
-    - `inkDrawingFilename`
-    - `highlightDrawingFilename`
-  - Soft delete via `deletedAt`.
-  - Per-note media rotation override.
-  - Drawing paper/tool defaults stored per note.
-
+  - `kindRaw` maps to `PLNoteKind`
+  - Optional payload fields for text, photo, ink, and highlight content
+  - Soft delete via `deletedAt`
+  - Per-note media rotation override
+  - Drawing defaults for paper style, pen width, marker width, line spacing, dot spacing, and dot size
 - `PLPendingUpload`
-  - Queue row for deferred sync work.
+  - Queue row for deferred folder/note sync work
 
-## Drawing Stack
+## Sync Model
 
-The drawing system is split across two files:
+PaperLink is local-first.
 
-- `PaperLink/NoteEditorScreen.swift`
-  - Chooses active tool/color/width.
-  - Builds the floating palette UI.
-  - Supplies `PKTool` instances to `PencilCanvasView`.
-  - For photo notes, uses separate canvases for ink and highlight.
+- Local changes enqueue `PLPendingUpload` rows
+- The sync manager pushes folders and notes to the backend
+- The sync manager pulls full or incremental updates from the backend
+- Remote purges remove local records and associated files
+- Media files are stored separately from SwiftData and are fetched by filename when needed
 
-- `PaperLink/PencilCanvasView.swift`
-  - Owns `PKCanvasView`.
-  - Applies drawing policy and gesture behavior.
-  - Maintains infinite canvas sizing and viewport reset.
-  - Avoids pushing drawing data back into the canvas on every SwiftUI update.
+The backend contract is documented by the app client and mirrored in `paperlink_server_hardened.txt`.
 
-### Recent Drawing Pain Points
+## Requirements
 
-If another agent is debugging the drawing editor, start here:
+- Xcode 26.2 or newer
+- iOS 18.6 / macOS 14.6 deployment targets in the current project
+- A Firebase project with Google Sign-In enabled
+- A valid `GoogleService-Info.plist`
+- A backend that implements the PaperLink sync API
 
-- Tool/color bugs are usually in `toolForCurrentState()` in `NoteEditorScreen.swift`.
-- Pencil/finger gesture bugs are usually in `configure(_:coordinator:)` in `PencilCanvasView.swift`.
-- Lag often comes from unnecessary `drawingData` round-trips between SwiftUI state and `PKCanvasView`.
-- Rotation/fullscreen issues for drawing notes are handled in the drawing branch of `zoomableEditorContent` in `NoteEditorScreen.swift`.
+## Setup
 
-## Auth and Network
+1. Open `PaperLink.xcodeproj` in Xcode.
+2. Add or replace `PaperLink/GoogleService-Info.plist` with your Firebase app configuration.
+3. Make sure the Google URL scheme in `PaperLink/Info.plist` matches your Firebase reversed client ID.
+4. Update the sync server URL in `PaperLink/PaperLinkApp.swift` if you are not using the current backend host.
+5. Build and run on an iPhone, iPad, or Mac Catalyst destination.
 
-- Google Sign-In and Firebase Auth are set up in `PaperLink/PaperLinkApp.swift` and `PaperLink/RootView.swift`.
-- `NetworkMonitor` gates edit behavior when offline.
-- The current policy is roughly:
-  - Offline users can still create new content locally.
-  - Modifying existing synced content is restricted in some flows.
+The app currently points the sync client at `https://paperlink.benchen.io`.
 
-## Important UX Conventions
+## Backend Contract
 
-- Deletion is usually soft delete, not immediate file removal.
-- Reading mode opens notes/folders in a viewer-like flow.
-- The app supports theme switching and some dark themes, but many editing surfaces still assume light paper.
-- iPhone has tighter restrictions than iPad for media note editing.
+The client expects these endpoints under `/v1/`:
 
-## Files Worth Reading First
+- `POST /v1/folders/upsert`
+- `POST /v1/notes/create`
+- `GET /v1/sync/full`
+- `GET /v1/sync/pull`
+- `POST /v1/trash/empty`
+- `GET /v1/files/get`
+- `GET /v1/stats/usage`
 
-For a quick mental model, read in this order:
+Requests are authenticated with Firebase ID tokens. The client also supports optional Cloudflare Access service-auth headers.
 
-1. `PaperLink/PaperLinkApp.swift`
-2. `PaperLink/RootView.swift`
-3. `PaperLink/Models.swift`
-4. `PaperLink/LibraryView.swift`
-5. `PaperLink/NoteEditorScreen.swift`
-6. `PaperLink/PencilCanvasView.swift`
-7. `PaperLink/FileStore.swift`
-8. `PaperLink/PaperLinkSyncManager.swift`
-9. `PaperLink/PaperLinkSyncClient.swift`
+## Notes
 
-## Known Constraints
-
-- There is very little automated test coverage.
-- Large files like `LibraryView.swift` and `NoteEditorScreen.swift` contain a lot of mixed responsibilities.
-- The project currently uses a single large note editor rather than splitting text/photo/drawing editors into separate modules.
-- Build system issues have previously shown up in Xcode DerivedData; if the build DB gets locked, clear the project-specific `XCBuildData` under DerivedData.
-
-## Suggested Next Refactors
-
-- Split `NoteEditorScreen.swift` into text/photo/drawing subfeatures.
-- Split the floating palette into its own file.
-- Introduce narrower sync/domain services instead of keeping most orchestration in `PaperLinkSyncManager`.
-- Add targeted UI tests for drawing note creation/editing on iPad.
+- Deletion is soft delete by default.
+- On iPhone, photo and drawing notes are generally view-only in the editor; text editing is more flexible.
+- The current unit and UI test targets are placeholders and do not provide meaningful coverage yet.

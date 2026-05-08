@@ -64,8 +64,15 @@ struct PencilCanvasView: UIViewRepresentable {
     var resetViewportToken: Int = 0
     var onZoomingChanged: ((Bool) -> Void)? = nil
 
-    private let canvasScaleMultiplier: CGFloat = 5.0
-    private let minimumCanvasSize = CGSize(width: 1800, height: 1800)
+    private var canvasScaleMultiplier: CGFloat {
+        UIDevice.current.userInterfaceIdiom == .phone ? 3.5 : 5.0
+    }
+
+    private var minimumCanvasSize: CGSize {
+        UIDevice.current.userInterfaceIdiom == .phone
+            ? CGSize(width: 1400, height: 1400)
+            : CGSize(width: 1800, height: 1800)
+    }
 
     func makeUIView(context: Context) -> PLCanvasContainerView {
         let container = PLCanvasContainerView()
@@ -122,7 +129,7 @@ struct PencilCanvasView: UIViewRepresentable {
         container.canvasView.alwaysBounceVertical = isInfiniteCanvas
         container.canvasView.maximumZoomScale = isInfiniteCanvas ? 6.0 : 1.0
         container.canvasView.drawingGestureRecognizer.isEnabled = !isReadOnly
-        container.canvasView.panGestureRecognizer.minimumNumberOfTouches = isReadOnly ? 1 : 2
+        container.canvasView.panGestureRecognizer.minimumNumberOfTouches = (isReadOnly || !allowsFingerDrawing) ? 1 : 2
         container.canvasView.panGestureRecognizer.maximumNumberOfTouches = 2
         container.updateAllowedTouchTypes(allowsFingerDrawing: allowsFingerDrawing, drawingPolicy: drawingPolicy)
         container.refreshOverlay()
@@ -186,8 +193,13 @@ final class PLCanvasContainerView: UIView, UIScrollViewDelegate {
     private var currentLineSpacing: CGFloat = CGFloat(PLDrawingDefaults.lineSpacing)
     private var currentDotSpacing: CGFloat = CGFloat(PLDrawingDefaults.dotSpacing)
     private var currentDotSize: CGFloat = CGFloat(PLDrawingDefaults.dotSize)
+    private var lastTouchConfigurationKey: String?
 
-    private var usesReadOnlySnapshotViewer: Bool { isReadOnly && isInfiniteCanvas }
+    private var usesReadOnlySnapshotViewer: Bool {
+        // The snapshot viewer is expensive to build on first display.
+        // Skip it on iPhone so drawing notes open immediately; the live canvas is sufficient there.
+        isReadOnly && isInfiniteCanvas && UIDevice.current.userInterfaceIdiom != .phone
+    }
     private let readOnlyCropPadding: CGFloat = 24
     private let alphaCropSearchPadding: CGFloat = 360
     private let maxCropAnalysisPixels: CGFloat = 2200
@@ -245,6 +257,9 @@ final class PLCanvasContainerView: UIView, UIScrollViewDelegate {
     }
 
     func updateAllowedTouchTypes(allowsFingerDrawing: Bool, drawingPolicy: PKCanvasViewDrawingPolicy) {
+        let key = "\(allowsFingerDrawing ? 1 : 0)|\(String(describing: drawingPolicy))"
+        guard lastTouchConfigurationKey != key else { return }
+        lastTouchConfigurationKey = key
         let directTouch = NSNumber(value: UITouch.TouchType.direct.rawValue)
         let pencilTouch = NSNumber(value: UITouch.TouchType.pencil.rawValue)
         switch drawingPolicy {
@@ -279,12 +294,10 @@ final class PLCanvasContainerView: UIView, UIScrollViewDelegate {
         latestDrawingData = data
         if usesReadOnlySnapshotViewer { markReadOnlySnapshotDirty(); renderReadOnlySnapshotIfNeeded(); return }
         guard let next = try? PKDrawing(data: data) else { return }
-        if next.dataRepresentation() != canvasView.drawing.dataRepresentation() {
-            canvasView.drawing = next
-            if isInfiniteCanvas {
-                setNeedsLayout()
-                if !hasAppliedInitialViewportFocus { focusViewportOnDrawingIfAvailable(animated: false); hasAppliedInitialViewportFocus = true }
-            }
+        canvasView.drawing = next
+        if isInfiniteCanvas {
+            setNeedsLayout()
+            if !hasAppliedInitialViewportFocus { focusViewportOnDrawingIfAvailable(animated: false); hasAppliedInitialViewportFocus = true }
         }
     }
 

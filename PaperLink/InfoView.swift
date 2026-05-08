@@ -52,7 +52,7 @@ struct InfoView: View {
                     .frame(width: headerMenuClearance, height: 1)
 
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("Paperlink")
+                    Text("PaperLink")
                         .font(.system(size: 34, weight: .heavy))
                         .foregroundStyle(p.textPrimary)
 

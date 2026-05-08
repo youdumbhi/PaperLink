@@ -87,15 +87,15 @@ final class PLThemeStore: ObservableObject {
             // Inferred from Apple Freeform's official screenshots: paper-white canvas,
             // subtly cooler UI surfaces, soft gray outlines, restrained blue accent.
             return PLThemePalette(
-                background: Color(red: 0.95, green: 0.96, blue: 0.97),
-                canvas: Color(red: 0.99, green: 0.99, blue: 1.00),
+                background: Color(red: 0.93, green: 0.94, blue: 0.96),
+                canvas: Color(red: 0.985, green: 0.988, blue: 0.995),
                 accent: Color(red: 0.20, green: 0.49, blue: 0.92),
-                railButton: Color(red: 0.98, green: 0.98, blue: 0.99),
-                card: Color(red: 0.97, green: 0.98, blue: 0.99),
-                textPrimary: Color(red: 0.15, green: 0.16, blue: 0.18),
-                textSecondary: Color(red: 0.41, green: 0.44, blue: 0.49),
+                railButton: Color(red: 0.92, green: 0.93, blue: 0.95),
+                card: Color(red: 0.96, green: 0.97, blue: 0.98),
+                textPrimary: Color(red: 0.13, green: 0.15, blue: 0.17),
+                textSecondary: Color(red: 0.38, green: 0.42, blue: 0.47),
                 danger: Color(red: 0.84, green: 0.27, blue: 0.24),
-                outline: Color.black.opacity(0.07)
+                outline: Color.black.opacity(0.09)
             )
 
         case .classic:
@@ -265,9 +265,9 @@ struct RootView: View {
 
     // Layout constants
     private let railWidth: CGFloat = 86
-    private let menuButtonSize: CGFloat = 56
-    private let menuTopPadding: CGFloat = 18
-    private let menuLeadingPadding: CGFloat = 16
+    private let menuButtonSize: CGFloat = 48
+    private let menuTopPadding: CGFloat = 14
+    private let menuLeadingPadding: CGFloat = 14
 
     // ✅ extra reserve so the first rail button never sits under the X/hamburger
     private let railTopReserveExtra: CGFloat = 14
@@ -341,7 +341,7 @@ struct RootView: View {
             }
 
             // SINGLE menu button (position stable)
-            MenuToggleButton(isOpen: $showSidebar)
+            MenuToggleButton(isOpen: $showSidebar, size: menuButtonSize)
                 .padding(.top, menuTopPadding)
                 .padding(.leading, menuLeadingPadding)
 
@@ -614,9 +614,11 @@ private struct OfflineBanner: View {
 private struct MenuToggleButton: View {
     @EnvironmentObject private var theme: PLThemeStore
     @Binding var isOpen: Bool
+    let size: CGFloat
 
     var body: some View {
         let p = theme.palette
+        let iconSize = max(18, size * 0.42)
 
         Button {
             withAnimation(.spring(response: 0.28, dampingFraction: 0.92)) {
@@ -624,20 +626,14 @@ private struct MenuToggleButton: View {
             }
         } label: {
             Image(systemName: isOpen ? "xmark" : "line.3.horizontal")
-                .font(.system(size: 22, weight: .bold))
-                .frame(width: 56, height: 56)
+                .font(.system(size: iconSize, weight: .bold))
+                .frame(width: size, height: size)
                 .background(
-                    RoundedRectangle(cornerRadius: 16)
-                        .fill(p.railButton)
-                        .shadow(
-                            color: .black.opacity(isOpen ? 0.0 : 0.18),
-                            radius: isOpen ? 0 : 10,
-                            x: 0,
-                            y: isOpen ? 0 : 6
-                        )
+                    Circle()
+                        .fill(p.card)
                 )
                 .overlay(
-                    RoundedRectangle(cornerRadius: 16)
+                    Circle()
                         .stroke(p.outline, lineWidth: 1)
                 )
                 .contentTransition(.symbolEffect(.replace))
@@ -770,6 +766,7 @@ struct SettingsView: View {
     @EnvironmentObject private var theme: PLThemeStore
     @EnvironmentObject private var auth: PLAuthStore
     @Environment(\.plDockedSidebarInset) private var dockedSidebarInset
+    @Environment(\.verticalSizeClass) private var vSizeClass
     @AppStorage("pl_apple_pencil_only_draw") private var applePencilOnlyDraw: Bool = false
     @AppStorage(PLDrawingPaletteDefaults.Key.autoMinimize) private var drawingPaletteAutoMinimize: Bool = PLDrawingPaletteDefaults.autoMinimize
     @AppStorage(PLDrawingDefaults.Key.paperStyleRaw) private var defaultDrawingPaperStyleRaw: String = PLDrawingDefaults.paperStyleRaw
@@ -787,151 +784,206 @@ struct SettingsView: View {
 #endif
     }
 
+    private var isPhonePortrait: Bool {
+#if canImport(UIKit)
+        UIDevice.current.userInterfaceIdiom == .phone && vSizeClass != .compact
+#else
+        false
+#endif
+    }
+
+    private var themeGridColumns: [GridItem] {
+        if isPhonePortrait {
+            return [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)]
+        }
+        return Array(repeating: GridItem(.flexible(), spacing: 10), count: 5)
+    }
+
     var body: some View {
         let p = theme.palette
 
         ScrollView {
-            HStack(alignment: .top, spacing: 14) {
-                Color.clear
-                    .frame(width: headerMenuClearance, height: 1)
-
-                VStack(alignment: .leading, spacing: 16) {
-                    Text("Settings")
-                        .font(.system(size: 28, weight: .heavy))
-                        .foregroundStyle(p.textPrimary)
-
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("Theme")
-                            .font(.system(size: 15, weight: .bold))
-                            .foregroundStyle(p.textSecondary)
-
-                        HStack(spacing: 10) {
-                            ForEach(PLTheme.allCases) { t in
-                                let selected = (theme.theme == t)
-
-                                Button {
-                                    withAnimation(.spring(response: 0.26, dampingFraction: 0.90)) {
-                                        theme.theme = t
-                                    }
-                                } label: {
-                                    Text(t.rawValue)
-                                        .font(.system(size: 14, weight: .bold))
-                                        .foregroundStyle(selected ? p.background : p.textPrimary)
-                                        .frame(maxWidth: .infinity)
-                                        .frame(height: 40)
-                                        .background(
-                                            RoundedRectangle(cornerRadius: 14)
-                                                .fill(selected ? p.textPrimary.opacity(0.92) : p.railButton)
-                                        )
-                                        .overlay(
-                                            RoundedRectangle(cornerRadius: 14)
-                                                .stroke(p.outline, lineWidth: 1)
-                                        )
-                                        .scaleEffect(selected ? 1.02 : 1.0)
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
-                    }
-                    .padding(16)
-                    .background(p.card)
-                    .clipShape(RoundedRectangle(cornerRadius: 18))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 18)
-                            .stroke(p.outline, lineWidth: 1)
-                    )
-
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Drawing")
-                            .font(.system(size: 15, weight: .bold))
-                            .foregroundStyle(p.textSecondary)
-
-                        Toggle("Only draw with Apple Pencil", isOn: $applePencilOnlyDraw)
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(p.textPrimary)
-                            .tint(p.accent)
-
-                        Toggle("Auto-minimize drawing palette", isOn: $drawingPaletteAutoMinimize)
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(p.textPrimary)
-                            .tint(p.accent)
-
-                        Text("When enabled, finger touches still pan and scroll, but only Apple Pencil creates strokes.")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(p.textSecondary)
-                    }
-                    .padding(16)
-                    .background(p.card)
-                    .clipShape(RoundedRectangle(cornerRadius: 18))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 18)
-                            .stroke(p.outline, lineWidth: 1)
-                    )
-
-                    PLDrawingPreferencesSection(
-                        paperStyle: Binding(
-                            get: { PLDrawingPaperStyle(rawValue: defaultDrawingPaperStyleRaw) ?? .lined },
-                            set: { defaultDrawingPaperStyleRaw = $0.rawValue }
-                        ),
-                        penWidth: $defaultPenWidth,
-                        markerWidth: $defaultMarkerWidth,
-                        lineSpacing: $defaultLineSpacing,
-                        dotSpacing: $defaultDotSpacing,
-                        dotSize: $defaultDotSize
-                    )
-
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Account")
-                            .font(.system(size: 15, weight: .bold))
-                            .foregroundStyle(p.textSecondary)
-
-                        if let email = auth.user?.email, !email.isEmpty {
-                            Text(email)
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundStyle(p.textPrimary)
-                        }
-
-                        Button(role: .destructive) {
-                            auth.signOut()
-                        } label: {
-                            Label("Sign Out", systemImage: "rectangle.portrait.and.arrow.right")
-                                .font(.system(size: 15, weight: .bold))
-                                .frame(maxWidth: .infinity)
-                                .frame(height: 46)
-                                .background(p.danger.opacity(0.16))
-                                .clipShape(RoundedRectangle(cornerRadius: 16))
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 16)
-                                        .stroke(p.danger.opacity(0.34), lineWidth: 1)
-                                )
-                        }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(p.danger)
-                    }
-                    .padding(16)
-                    .background(p.card)
-                    .clipShape(RoundedRectangle(cornerRadius: 18))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 18)
-                            .stroke(p.outline, lineWidth: 1)
-                    )
-
-                    Spacer(minLength: 0)
-                }
-
+            VStack(alignment: .leading, spacing: 16) {
+                headerRow
+                themeSection
+                drawingSection
+                PLDrawingPreferencesSection(
+                    paperStyle: Binding(
+                        get: { PLDrawingPaperStyle(rawValue: defaultDrawingPaperStyleRaw) ?? .lined },
+                        set: { defaultDrawingPaperStyleRaw = $0.rawValue }
+                    ),
+                    penWidth: $defaultPenWidth,
+                    markerWidth: $defaultMarkerWidth,
+                    lineSpacing: $defaultLineSpacing,
+                    dotSpacing: $defaultDotSpacing,
+                    dotSize: $defaultDotSize
+                )
+                accountSection
                 Spacer(minLength: 0)
             }
-            .padding(22)
+            .padding(isPhonePortrait ? 14 : 22)
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
         .scrollIndicators(.hidden)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(p.canvas.ignoresSafeArea())
     }
+
+    private var headerRow: some View {
+        let p = theme.palette
+
+        return HStack(alignment: .top, spacing: 14) {
+            Color.clear
+                .frame(width: headerMenuClearance, height: 1)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Settings")
+                    .font(.system(size: 28, weight: .heavy))
+                    .foregroundStyle(p.textPrimary)
+
+                Text("Adjust the app behavior and drawing defaults.")
+                    .font(.system(size: isPhonePortrait ? 13 : 14, weight: .semibold))
+                    .foregroundStyle(p.textSecondary)
+                    .lineLimit(2)
+            }
+
+            Spacer(minLength: 0)
+        }
+    }
+
+    private var themeSection: some View {
+        let p = theme.palette
+
+        return VStack(alignment: .leading, spacing: 12) {
+            Text("Theme")
+                .font(.system(size: 15, weight: .bold))
+                .foregroundStyle(p.textSecondary)
+
+            if isPhonePortrait {
+                LazyVGrid(columns: themeGridColumns, spacing: 8) {
+                    ForEach(PLTheme.allCases) { t in
+                        themeButton(for: t)
+                    }
+                }
+            } else {
+                HStack(spacing: 10) {
+                    ForEach(PLTheme.allCases) { t in
+                        themeButton(for: t)
+                    }
+                }
+            }
+        }
+        .padding(16)
+        .background(p.card)
+        .clipShape(RoundedRectangle(cornerRadius: 18))
+        .overlay(
+            RoundedRectangle(cornerRadius: 18)
+                .stroke(p.outline, lineWidth: 1)
+        )
+    }
+
+    private func themeButton(for t: PLTheme) -> some View {
+        let p = theme.palette
+        let selected = (theme.theme == t)
+
+        return Button {
+            withAnimation(.spring(response: 0.26, dampingFraction: 0.90)) {
+                theme.theme = t
+            }
+        } label: {
+            Text(t.rawValue)
+                .font(.system(size: 14, weight: .bold))
+                .foregroundStyle(selected ? p.background : p.textPrimary)
+                .frame(maxWidth: .infinity)
+                .frame(height: 40)
+                .background(
+                    RoundedRectangle(cornerRadius: 14)
+                        .fill(selected ? p.textPrimary.opacity(0.92) : p.railButton)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14)
+                        .stroke(p.outline, lineWidth: 1)
+                )
+                .scaleEffect(selected ? 1.02 : 1.0)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var drawingSection: some View {
+        let p = theme.palette
+
+        return VStack(alignment: .leading, spacing: 10) {
+            Text("Drawing")
+                .font(.system(size: 15, weight: .bold))
+                .foregroundStyle(p.textSecondary)
+
+            Toggle("Only draw with Apple Pencil", isOn: $applePencilOnlyDraw)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(p.textPrimary)
+                .tint(p.accent)
+
+            Toggle("Auto-minimize drawing palette", isOn: $drawingPaletteAutoMinimize)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(p.textPrimary)
+                .tint(p.accent)
+
+            Text("When enabled, finger touches still pan and scroll, but only Apple Pencil creates strokes.")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(p.textSecondary)
+        }
+        .padding(16)
+        .background(p.card)
+        .clipShape(RoundedRectangle(cornerRadius: 18))
+        .overlay(
+            RoundedRectangle(cornerRadius: 18)
+                .stroke(p.outline, lineWidth: 1)
+        )
+    }
+
+    private var accountSection: some View {
+        let p = theme.palette
+
+        return VStack(alignment: .leading, spacing: 10) {
+            Text("Account")
+                .font(.system(size: 15, weight: .bold))
+                .foregroundStyle(p.textSecondary)
+
+            if let email = auth.user?.email, !email.isEmpty {
+                Text(email)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(p.textPrimary)
+            }
+
+            Button(role: .destructive) {
+                auth.signOut()
+            } label: {
+                Label("Sign Out", systemImage: "rectangle.portrait.and.arrow.right")
+                    .font(.system(size: 15, weight: .bold))
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 46)
+                    .background(p.danger.opacity(0.16))
+                    .clipShape(RoundedRectangle(cornerRadius: 16))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16)
+                            .stroke(p.danger.opacity(0.34), lineWidth: 1)
+                    )
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(p.danger)
+        }
+        .padding(16)
+        .background(p.card)
+        .clipShape(RoundedRectangle(cornerRadius: 18))
+        .overlay(
+            RoundedRectangle(cornerRadius: 18)
+                .stroke(p.outline, lineWidth: 1)
+        )
+    }
 }
 
 struct PLDrawingPreferencesSection: View {
     @EnvironmentObject private var theme: PLThemeStore
+    @Environment(\.horizontalSizeClass) private var hSizeClass
 
     @Binding var paperStyle: PLDrawingPaperStyle
     @Binding var penWidth: Double
@@ -939,6 +991,8 @@ struct PLDrawingPreferencesSection: View {
     @Binding var lineSpacing: Double
     @Binding var dotSpacing: Double
     @Binding var dotSize: Double
+
+    private var isCompactWidth: Bool { hSizeClass == .compact }
 
     var body: some View {
         let p = theme.palette
@@ -952,16 +1006,38 @@ struct PLDrawingPreferencesSection: View {
                 .font(.system(size: 13, weight: .bold))
                 .foregroundStyle(p.textPrimary.opacity(0.85))
 
-            HStack(spacing: 10) {
-                ForEach(PLDrawingPaperStyle.allCases, id: \.self) { style in
-                    DrawingPaperPreviewTile(
-                        style: style,
-                        isSelected: paperStyle == style,
-                        lineSpacing: lineSpacing,
-                        dotSpacing: dotSpacing,
-                        dotSize: dotSize
-                    ) {
-                        paperStyle = style
+            if isCompactWidth {
+                LazyVGrid(
+                    columns: [
+                        GridItem(.flexible(), spacing: 10),
+                        GridItem(.flexible(), spacing: 10)
+                    ],
+                    spacing: 10
+                ) {
+                    ForEach(PLDrawingPaperStyle.allCases, id: \.self) { style in
+                        DrawingPaperPreviewTile(
+                            style: style,
+                            isSelected: paperStyle == style,
+                            lineSpacing: lineSpacing,
+                            dotSpacing: dotSpacing,
+                            dotSize: dotSize
+                        ) {
+                            paperStyle = style
+                        }
+                    }
+                }
+            } else {
+                HStack(spacing: 10) {
+                    ForEach(PLDrawingPaperStyle.allCases, id: \.self) { style in
+                        DrawingPaperPreviewTile(
+                            style: style,
+                            isSelected: paperStyle == style,
+                            lineSpacing: lineSpacing,
+                            dotSpacing: dotSpacing,
+                            dotSize: dotSize
+                        ) {
+                            paperStyle = style
+                        }
                     }
                 }
             }
