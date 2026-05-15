@@ -8,6 +8,7 @@ final class PaperLinkSyncManager: ObservableObject {
     private init() {}
 
     private var client: PaperLinkSyncClient?
+    private var cloudSyncEnabled = false
     private var isProcessingQueue = false
     private var queuePassRequested = false
     private var isSyncingDown = false
@@ -22,7 +23,20 @@ final class PaperLinkSyncManager: ObservableObject {
         client = PaperLinkSyncClient(config: .init(baseURL: url))
     }
 
+    func setCloudSyncEnabled(_ enabled: Bool) {
+        cloudSyncEnabled = enabled
+
+        if !enabled {
+            scheduledKickTask?.cancel()
+            scheduledKickTask = nil
+            syncCycleRequested = false
+            fullSyncRequested = false
+            queuePassRequested = false
+        }
+    }
+
     func fetchUsageStats() async throws -> RemoteUsageStats {
+        guard cloudSyncEnabled else { throw PaperLinkSyncClient.SyncError.notSignedIn }
         guard let client else { throw PaperLinkSyncClient.SyncError.badURL }
         return try await client.fetchUsageStats()
     }
@@ -30,16 +44,22 @@ final class PaperLinkSyncManager: ObservableObject {
     // MARK: - Queue
 
     func enqueueFolder(_ folder: PLFolder, ctx: ModelContext) {
+        guard cloudSyncEnabled else { return }
         upsertQueueItem(entityType: "folder", entityID: folder.id.uuidString, ctx: ctx)
         scheduleSyncKick(ctx: ctx)
     }
 
     func enqueueNote(_ note: PLNote, ctx: ModelContext) {
+        guard cloudSyncEnabled else { return }
         upsertQueueItem(entityType: "note", entityID: note.id.uuidString, ctx: ctx)
         scheduleSyncKick(ctx: ctx)
     }
 
     func emptyTrash(ctx: ModelContext) async throws {
+        guard cloudSyncEnabled else {
+            performLocalEmptyTrash(ctx: ctx)
+            return
+        }
         guard let client else { return }
         try await client.emptyTrash()
         _ = await syncDownFromServer(ctx: ctx, forceFullSync: true)
@@ -47,6 +67,7 @@ final class PaperLinkSyncManager: ObservableObject {
     }
 
     func runSyncCycle(ctx: ModelContext, allowUpload: Bool, forceFullSync: Bool = false) async {
+        guard cloudSyncEnabled else { return }
         guard client != nil else { return }
         guard allowUpload else { return }
 
@@ -60,6 +81,10 @@ final class PaperLinkSyncManager: ObservableObject {
         defer { isSyncCycleRunning = false }
 
         while syncCycleRequested {
+            guard cloudSyncEnabled else {
+                syncCycleRequested = false
+                break
+            }
             syncCycleRequested = false
 
             let shouldForceFullSync = fullSyncRequested || lastSuccessfulPullServerTime == nil
@@ -79,6 +104,7 @@ final class PaperLinkSyncManager: ObservableObject {
     }
 
     func processQueueIfPossible(ctx: ModelContext, allowUpload: Bool) async -> Bool {
+        guard cloudSyncEnabled else { return false }
         guard allowUpload else { return false }
         guard let client else { return false }
         if isProcessingQueue {
@@ -182,6 +208,7 @@ final class PaperLinkSyncManager: ObservableObject {
     // MARK: - ✅ PULL (restore from server)
 
     func syncDownFromServer(ctx: ModelContext, forceFullSync: Bool = false) async -> FullSyncPayload? {
+        guard cloudSyncEnabled else { return nil }
         guard let client else { return nil }
         guard !isSyncingDown else { return nil }
 
@@ -584,7 +611,35 @@ final class PaperLinkSyncManager: ObservableObject {
         try? ctx.save()
     }
 
+    private func performLocalEmptyTrash(ctx: ModelContext) {
+        let deletedNotes = (try? ctx.fetch(FetchDescriptor<PLNote>()))?.filter { $0.deletedAt != nil } ?? []
+        let deletedFolders = (try? ctx.fetch(FetchDescriptor<PLFolder>()))?.filter { $0.deletedAt != nil } ?? []
+
+        for note in deletedNotes {
+            purgeLocalFiles(for: note)
+            ctx.delete(note)
+        }
+
+        for folder in deletedFolders {
+            ctx.delete(folder)
+        }
+
+        clearQueueItems(
+            entityType: "note",
+            entityIDs: Set(deletedNotes.map(\.id.uuidString)),
+            ctx: ctx
+        )
+        clearQueueItems(
+            entityType: "folder",
+            entityIDs: Set(deletedFolders.map(\.id.uuidString)),
+            ctx: ctx
+        )
+
+        try? ctx.save()
+    }
+
     private func scheduleSyncKick(ctx: ModelContext) {
+        guard cloudSyncEnabled else { return }
         scheduledKickTask?.cancel()
         scheduledKickTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 50_000_000)

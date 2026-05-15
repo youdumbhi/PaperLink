@@ -180,6 +180,7 @@ final class NetworkMonitor: ObservableObject {
 @MainActor
 final class PLAuthStore: ObservableObject {
     @Published private(set) var user: FirebaseAuth.User? = nil
+    @Published private(set) var isGuestSession: Bool = false
     @Published private(set) var isBooting: Bool = true
     @Published var isSigningIn: Bool = false
     @Published var lastErrorMessage: String? = nil
@@ -190,19 +191,42 @@ final class PLAuthStore: ObservableObject {
         authHandle = Auth.auth().addStateDidChangeListener { [weak self] _, user in
             guard let self else { return }
             self.user = user
+            if user != nil {
+                self.isGuestSession = false
+            }
             self.isBooting = false
         }
     }
 
-    var isSignedIn: Bool { user != nil }
+    var isAppSessionActive: Bool { user != nil || isGuestSession }
+    var canUseCloudSync: Bool { user != nil }
+    var sessionIdentifier: String? {
+        if let user { return user.uid }
+        if isGuestSession { return "guest" }
+        return nil
+    }
 
     func signOut() {
+        if isGuestSession {
+            isGuestSession = false
+            lastErrorMessage = nil
+            isBooting = false
+            return
+        }
+
         do {
             try Auth.auth().signOut()
             GIDSignIn.sharedInstance.signOut()
+            isGuestSession = false
         } catch {
             lastErrorMessage = error.localizedDescription
         }
+    }
+
+    func startGuestSession() {
+        lastErrorMessage = nil
+        isGuestSession = true
+        isBooting = false
     }
 
     func signInWithGoogle() async {
@@ -238,6 +262,7 @@ final class PLAuthStore: ObservableObject {
             let accessToken = result.user.accessToken.tokenString
             let credential = GoogleAuthProvider.credential(withIDToken: idToken, accessToken: accessToken)
             _ = try await Auth.auth().signIn(with: credential)
+            isGuestSession = false
 
         } catch {
             lastErrorMessage = error.localizedDescription
@@ -251,7 +276,9 @@ struct RootView: View {
     @EnvironmentObject private var theme: PLThemeStore
     @EnvironmentObject private var auth: PLAuthStore
     @EnvironmentObject private var network: NetworkMonitor
+    @EnvironmentObject private var tutorial: PLTutorialCoordinator
     @Environment(\.horizontalSizeClass) private var hSizeClass
+    @AppStorage("pl_tutorial_seen_session_key") private var tutorialSeenSessionKey: String = ""
 
     @State private var tab: PLRailTab = .library
 
@@ -285,15 +312,37 @@ struct RootView: View {
 
                 if auth.isBooting {
                     bootSplash
-                } else if !auth.isSignedIn {
+                } else if !auth.isAppSessionActive {
                     SignInScreen()
                 } else {
                     mainAppShell(topSafeInset: topSafeInset)
                         .environment(\.plDockedSidebarInset, dockedSidebarInset)
+                        .id(auth.sessionIdentifier ?? "boot")
+                }
+            }
+            .overlayPreferenceValue(PLTutorialAnchorPreferenceKey.self) { anchors in
+                if tutorial.isActive {
+                    TutorialFlowView(
+                        anchors: anchors,
+                        allowedTargets: [.createButton, .photoNoteButton, .folderCard, .folderMenu, .noteCard, .noteMenu]
+                    )
                 }
             }
         }
-        .animation(.spring(response: 0.28, dampingFraction: 0.92), value: auth.isSignedIn)
+        .animation(.spring(response: 0.28, dampingFraction: 0.92), value: auth.isAppSessionActive)
+        .onAppear {
+            evaluateTutorialPresentation()
+        }
+        .onChange(of: auth.sessionIdentifier) { _, _ in
+            evaluateTutorialPresentation()
+        }
+        .onChange(of: tutorial.isActive) { _, isActive in
+            guard !isActive else { return }
+            guard let sessionKey = tutorial.sessionKey else { return }
+            guard auth.sessionIdentifier == sessionKey else { return }
+            guard !auth.isGuestSession else { return }
+            tutorialSeenSessionKey = sessionKey
+        }
     }
 
     // MARK: - Boot splash
@@ -486,6 +535,16 @@ struct RootView: View {
         offlineBannerDismissWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + 4.5, execute: workItem)
     }
+
+    private func evaluateTutorialPresentation() {
+        guard let sessionKey = auth.sessionIdentifier else {
+            tutorial.dismiss()
+            return
+        }
+
+        let shouldShow = auth.isGuestSession || tutorialSeenSessionKey != sessionKey
+        tutorial.present(sessionKey: sessionKey, shouldShow: shouldShow)
+    }
 }
 
 // MARK: - Sign In Screen
@@ -543,6 +602,34 @@ private struct SignInScreen: View {
                 .buttonStyle(.plain)
                 .disabled(auth.isSigningIn)
                 .opacity(auth.isSigningIn ? 0.7 : 1.0)
+
+#if DEBUG
+                Button {
+                    auth.startGuestSession()
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "person.fill.badge.plus")
+                            .font(.system(size: 18, weight: .bold))
+
+                        Text("Continue for Testing")
+                            .font(.system(size: 16, weight: .bold))
+                    }
+                    .foregroundStyle(p.textPrimary)
+                    .frame(maxWidth: 340)
+                    .frame(height: 54)
+                    .background(
+                        RoundedRectangle(cornerRadius: 16)
+                            .fill(p.railButton)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16)
+                            .stroke(p.outline, lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+                .disabled(auth.isSigningIn)
+                .opacity(auth.isSigningIn ? 0.7 : 1.0)
+#endif
 
                 if let msg = auth.lastErrorMessage, !msg.isEmpty {
                     Text(msg)
@@ -952,12 +1039,22 @@ struct SettingsView: View {
                 Text(email)
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(p.textPrimary)
+            } else if auth.isGuestSession {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Testing session active")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(p.textPrimary)
+
+                    Text("Cloud sync is off in this session.")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(p.textSecondary)
+                }
             }
 
             Button(role: .destructive) {
                 auth.signOut()
             } label: {
-                Label("Sign Out", systemImage: "rectangle.portrait.and.arrow.right")
+                Label(auth.isGuestSession ? "End Testing Session" : "Sign Out", systemImage: "rectangle.portrait.and.arrow.right")
                     .font(.system(size: 15, weight: .bold))
                     .frame(maxWidth: .infinity)
                     .frame(height: 46)
@@ -1229,6 +1326,7 @@ struct RecentlyDeletedView: View {
     @Environment(\.modelContext) private var ctx
     @Environment(\.plDockedSidebarInset) private var dockedSidebarInset
     @EnvironmentObject private var theme: PLThemeStore
+    @EnvironmentObject private var auth: PLAuthStore
     @EnvironmentObject private var network: NetworkMonitor
 
     @Query(sort: \PLNote.updatedAt, order: .reverse) private var allNotes: [PLNote]
@@ -1317,7 +1415,9 @@ struct RecentlyDeletedView: View {
     }
 
     private var canEmptyTrash: Bool {
-        network.isOnline && !visibleTrashEntries.isEmpty && !isEmptyingTrash
+        !visibleTrashEntries.isEmpty
+        && !isEmptyingTrash
+        && (auth.canUseCloudSync ? network.isOnline : true)
     }
 
     var body: some View {
@@ -1395,7 +1495,11 @@ struct RecentlyDeletedView: View {
                 .foregroundStyle(p.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            if !network.isOnline {
+            if auth.isGuestSession {
+                Text("Testing session keeps trash isolated. Empty Trash only clears this workspace.")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(p.textSecondary)
+            } else if !network.isOnline {
                 Text("Connect to the internet to empty trash across devices.")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(p.textSecondary)

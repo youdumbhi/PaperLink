@@ -4,7 +4,7 @@ import SwiftUI
 import PencilKit
 import UIKit
 
-final class PLCanvasView: PKCanvasView, UIScribbleInteractionDelegate {
+final class PLCanvasView: PKCanvasView {
     override var canBecomeFirstResponder: Bool { false }
     override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool { false }
     override var editingInteractionConfiguration: UIEditingInteractionConfiguration { .none }
@@ -18,11 +18,8 @@ final class PLCanvasView: PKCanvasView, UIScribbleInteractionDelegate {
     }
 
     override func didMoveToWindow() { super.didMoveToWindow(); suppressEditingGestures() }
-    func scribbleInteraction(_ interaction: UIScribbleInteraction, shouldBeginAt location: CGPoint) -> Bool { false }
-    func scribbleInteractionShouldDelayFocus(_ interaction: UIScribbleInteraction) -> Bool { false }
 
     private func commonInit() {
-        addInteraction(UIScribbleInteraction(delegate: self))
         suppressEditingGestures()
     }
 
@@ -63,6 +60,7 @@ struct PencilCanvasView: UIViewRepresentable {
     var dotSize: CGFloat = CGFloat(PLDrawingDefaults.dotSize)
     var resetViewportToken: Int = 0
     var onZoomingChanged: ((Bool) -> Void)? = nil
+    var onCanvasTap: (() -> Void)? = nil
 
     private var canvasScaleMultiplier: CGFloat {
         UIDevice.current.userInterfaceIdiom == .phone ? 3.5 : 5.0
@@ -107,6 +105,7 @@ struct PencilCanvasView: UIViewRepresentable {
     private func configure(_ container: PLCanvasContainerView, coordinator: Coordinator) {
         container.canvasScaleMultiplier = canvasScaleMultiplier
         container.minimumCanvasSize = minimumCanvasSize
+        container.onCanvasTap = onCanvasTap
         container.configurePaper(style: paperStyle, baseColor: paperBaseColor, guideColor: paperGuideColor, lineSpacing: lineSpacing, dotSpacing: dotSpacing, dotSize: dotSize)
         container.isInfiniteCanvas = isInfiniteCanvas
         container.isReadOnly = isReadOnly
@@ -170,6 +169,7 @@ final class PLCanvasContainerView: UIView, UIScrollViewDelegate {
     let canvasView = PLCanvasView()
     private let readOnlyScrollView = UIScrollView()
     private let readOnlyImageView = UIImageView()
+    var onCanvasTap: (() -> Void)?
 
     var canvasScaleMultiplier: CGFloat = 5.0
     var minimumCanvasSize: CGSize = CGSize(width: 1800, height: 1800)
@@ -215,6 +215,14 @@ final class PLCanvasContainerView: UIView, UIScrollViewDelegate {
         addSubview(canvasView)
         canvasView.overrideUserInterfaceStyle = .light
 
+        let dismissTap = UITapGestureRecognizer(target: self, action: #selector(handleCanvasTap))
+        dismissTap.cancelsTouchesInView = false
+        dismissTap.allowedTouchTypes = [
+            NSNumber(value: UITouch.TouchType.direct.rawValue),
+            NSNumber(value: UITouch.TouchType.pencil.rawValue)
+        ]
+        addGestureRecognizer(dismissTap)
+
         readOnlyScrollView.delegate = self
         readOnlyScrollView.backgroundColor = .clear
         readOnlyScrollView.showsHorizontalScrollIndicator = false
@@ -231,6 +239,10 @@ final class PLCanvasContainerView: UIView, UIScrollViewDelegate {
         readOnlyScrollView.addSubview(readOnlyImageView)
         addSubview(readOnlyScrollView)
         updateModeVisibility()
+    }
+
+    @objc private func handleCanvasTap() {
+        onCanvasTap?()
     }
 
     private func resetModeState() {
@@ -295,6 +307,7 @@ final class PLCanvasContainerView: UIView, UIScrollViewDelegate {
         if usesReadOnlySnapshotViewer { markReadOnlySnapshotDirty(); renderReadOnlySnapshotIfNeeded(); return }
         guard let next = try? PKDrawing(data: data) else { return }
         canvasView.drawing = next
+        canvasView.undoManager?.removeAllActions()
         if isInfiniteCanvas {
             setNeedsLayout()
             if !hasAppliedInitialViewportFocus { focusViewportOnDrawingIfAvailable(animated: false); hasAppliedInitialViewportFocus = true }

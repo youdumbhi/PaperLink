@@ -59,6 +59,7 @@ struct LibraryView: View {
     @Environment(\.modelContext) private var ctx
     @EnvironmentObject private var theme: PLThemeStore
     @EnvironmentObject private var network: NetworkMonitor
+    @EnvironmentObject private var tutorial: PLTutorialCoordinator
     @Environment(\.plDockedSidebarInset) private var dockedSidebarInset
     @Environment(\.horizontalSizeClass) private var hSizeClass
 
@@ -262,100 +263,130 @@ struct LibraryView: View {
     // MARK: - Body
 
     var body: some View {
+        libraryPresentedView
+    }
+
+    private var libraryPresentedView: some View {
+        librarySheetView
+            .animation(.spring(response: 0.30, dampingFraction: 0.90), value: currentFolderID)
+            .onChange(of: network.isOnline) { _, isOnline in
+                if !isOnline {
+                    closeMenu()
+                    showMoveToFolderSheet = false
+                    showTrashSlider = false
+                    pendingTrashFolder = nil
+                    pendingTrashNote = nil
+                    pendingNoteToMove = nil
+                    pendingNoteForFolder = nil
+                }
+            }
+            .photosPicker(
+                isPresented: $showPhotoPicker,
+                selection: $pickerItems,
+                maxSelectionCount: 50,
+                matching: .images
+            )
+            .onChange(of: pickerItems) { _, items in
+                guard !items.isEmpty else { return }
+                Task {
+                    let datas = await loadPhotoDatas(items)
+                    await MainActor.run {
+                        pickerItems = []
+                        handlePickedPhotoDatas(datas)
+                    }
+                }
+            }
+            .fullScreenCover(isPresented: $showCustomCamera) {
+                CustomCameraCaptureView { datas in
+                    let cleaned = datas.filter { !$0.isEmpty }
+                    guard !cleaned.isEmpty else { return }
+                    handlePickedPhotoDatas(cleaned)
+                }
+                .ignoresSafeArea()
+            }
+            .alert("Camera unavailable", isPresented: $showCameraUnavailableAlert) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text("The iOS Simulator usually doesn’t have a working camera. Try on a real device.")
+            }
+            .fullScreenCover(item: $previewingNote, onDismiss: {
+                previewingNote = nil
+            }) { note in
+                NoteEditorScreen(note: note, startInPreview: true)
+            }
+            .fullScreenCover(item: $editingNote, onDismiss: {
+                editingNote = nil
+            }) { note in
+                NoteEditorScreen(note: note, startInPreview: false, newlyCreated: true)
+            }
+            .fullScreenCover(isPresented: $showReadingMode) {
+                ReadingModeScreen(
+                    notes: readingNotes,
+                    startIndex: readingIndex,
+                    title: readingFolderTitle,
+                    onClose: {
+                        tutorial.readingModeClosed()
+                        closeReadingModeAndAnyNote()
+                    }
+                )
+            }
+            .sheet(isPresented: $showNewItemSheet) {
+                newItemSheetView
+            }
+            .alert("New folder", isPresented: $showNewFolderAlert) {
+                TextField("Folder name", text: $newFolderName)
+                Button("Create folder") { createFolder(name: newFolderName, parentID: currentFolderID) }
+                Button("Cancel", role: .cancel) {}
+            }
+            .alert("Name this folder", isPresented: $showMultiPhotoFolderAlert) {
+                TextField("Folder name", text: $multiPhotoFolderName)
+                Button("Done") {
+                    createFolderWithPhotos(
+                        name: multiPhotoFolderName,
+                        parentID: currentFolderID,
+                        photoDatas: pendingMultiPhotoDatas
+                    )
+                }
+            } message: {
+                Text("You selected \(pendingMultiPhotoDatas.count) photos. They’ll be saved as separate photo notes inside a new folder.")
+            }
+            .alert("New folder with note", isPresented: $showCreateFolderWithNoteAlert) {
+                TextField("Folder name", text: $folderWithNoteName)
+                Button("Create folder") { createFolderWithNote() }
+                Button("Cancel", role: .cancel) {
+                    pendingNoteForFolder = nil
+                    folderWithNoteName = ""
+                }
+            }
+            .sheet(isPresented: $showMoveToFolderSheet) {
+                moveToFolderSheetView
+            }
+            .sheet(isPresented: $showPinnedGrid) {
+                pinnedGridSheetView
+            }
+            .sheet(isPresented: $showSearchSheet) {
+                searchSheet
+            }
+            .sheet(isPresented: $showTrashSlider) {
+                let isFolder = (pendingTrashFolder != nil)
+                triggeringDeleteSlider(isFolder: isFolder)
+            }
+            .sheet(isPresented: $showPropertiesSheet) {
+                propertiesSheetView
+            }
+    }
+
+    private var librarySheetView: some View {
         let p = theme.palette
 
-        ZStack {
+        return ZStack {
             p.background.ignoresSafeArea()
 
             VStack(spacing: stackTopSpacing) {
                 headerBar
 
                 ScrollView(showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: sectionSpacing) {
-                        if currentFolderID != nil {
-                            folderBreadcrumb
-                        }
-
-                        if currentFolderID != nil {
-                            if orderedFolderContents.isEmpty {
-                                emptyStateView
-                            } else {
-                                orderedContentGrid
-                            }
-                        } else {
-                            // Pinned (only if exists)
-                            if !pinnedNotes.isEmpty {
-                                SectionHeader(title: "Pinned", accessory: "View all pinned") {
-                                    showPinnedGrid = true
-                                }
-
-                                if isPhoneCompact {
-                                    CompactNotesGrid(
-                                        notes: Array(pinnedNotes.prefix(4)),
-                                        cardSide: cardSide,
-                                        gridSpacing: gridSpacing,
-                                        outline: p.outline,
-                                        columns: phoneGridColumns,
-                                        canDrag: canModifyExisting,
-                                        onOpen: { note in
-                                            handleNoteTap(note)
-                                        }
-                                    )
-                                } else {
-                                    HorizontalPreviewRowSquare(
-                                        notes: Array(pinnedNotes.prefix(10)),
-                                        cardSide: cardSide,
-                                        outline: p.outline,
-                                        canDrag: canModifyExisting,
-                                        onOpen: { note in
-                                            handleNoteTap(note)
-                                        }
-                                    )
-                                }
-                            }
-
-                            if !recentContents.isEmpty {
-                                SectionHeader(title: "Recents")
-
-                                HorizontalPreviewRowMixed(
-                                    items: Array(recentContents.prefix(isPhoneCompact ? 10 : 12)),
-                                    cardSide: cardSide,
-                                    outline: p.outline,
-                                    canDrag: canModifyExisting,
-                                    folderPreviewNote: { folder in
-                                        folderPreviewNote(folderID: folder.id)
-                                    },
-                                    folderCardStats: { folder in
-                                        folderCardStats(for: folder)
-                                    },
-                                    onOpenNote: { note in
-                                        handleNoteTap(note)
-                                    },
-                                    onOpenFolder: { folder in
-                                        handleFolderTap(folder)
-                                    }
-                                )
-                            }
-
-                            if !scopedFolders.isEmpty {
-                                SectionHeader(title: "Folders", accessory: "New folder") {
-                                    showNewFolderAlert = true
-                                }
-                                folderGrid
-                            }
-
-                            if !scopedNotes.isEmpty {
-                                SectionHeader(title: "Notes")
-                                notesGrid
-                            }
-
-                            if pinnedNotes.isEmpty, recentContents.isEmpty, scopedFolders.isEmpty, scopedNotes.isEmpty {
-                                emptyStateView
-                            }
-                        }
-                    }
-                    .padding(.horizontal, pageHPad)
-                    .padding(.bottom, pageBottomPad)
+                    libraryScrollContent
                 }
             }
             .padding(.leading, contentLeadingInset)
@@ -363,207 +394,224 @@ struct LibraryView: View {
                 menuOverlay(anchors: anchors)
             }
         }
-        .animation(.spring(response: 0.30, dampingFraction: 0.90), value: currentFolderID)
+    }
 
-        // If we go offline mid-session, close any destructive/modifying UI.
-        .onChange(of: network.isOnline) { _, isOnline in
-            if !isOnline {
-                closeMenu()
-                showMoveToFolderSheet = false
-                showTrashSlider = false
-                pendingTrashFolder = nil
-                pendingTrashNote = nil
-                pendingNoteToMove = nil
-                pendingNoteForFolder = nil
-            }
-        }
-
-        // MARK: - Sheets / Alerts
-
-        // Import photo(s)
-        .photosPicker(
-            isPresented: $showPhotoPicker,
-            selection: $pickerItems,
-            maxSelectionCount: 50,
-            matching: .images
-        )
-        .onChange(of: pickerItems) { _, items in
-            guard !items.isEmpty else { return }
-            Task {
-                let datas = await loadPhotoDatas(items)
-                await MainActor.run {
-                    pickerItems = []
-                    handlePickedPhotoDatas(datas)
-                }
-            }
-        }
-
-        // ✅ NEW: Custom multi-shot camera screen
-        .fullScreenCover(isPresented: $showCustomCamera) {
-            CustomCameraCaptureView { datas in
-                let cleaned = datas.filter { !$0.isEmpty }
-                guard !cleaned.isEmpty else { return }
-                handlePickedPhotoDatas(cleaned) // your existing multi-photo folder flow
-            }
-            .ignoresSafeArea()
-        }
-
-        .alert("Camera unavailable", isPresented: $showCameraUnavailableAlert) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text("The iOS Simulator usually doesn’t have a working camera. Try on a real device.")
-        }
-
-        // Existing note: open PREVIEW first
-        .fullScreenCover(item: $previewingNote, onDismiss: {
-            previewingNote = nil
-        }) { note in
-            NoteEditorScreen(note: note, startInPreview: true)
-        }
-
-        // New note editor: created immediately, opened directly
-        .fullScreenCover(item: $editingNote, onDismiss: {
-            editingNote = nil
-        }) { note in
-            NoteEditorScreen(note: note, startInPreview: false, newlyCreated: true)
-        }
-
-        // Reading mode
-        .fullScreenCover(isPresented: $showReadingMode) {
-            ReadingModeScreen(
-                notes: readingNotes,
-                startIndex: readingIndex,
-                title: readingFolderTitle,
-                onClose: { closeReadingModeAndAnyNote() }
-            )
-        }
-
-        // "+" options sheet
-        .sheet(isPresented: $showNewItemSheet) {
-            NewItemSheet(
-                showDrawingOption: !isPhoneCompact, // iPhone: no drawing note creation
-                onNewText: {
-                    showNewItemSheet = false
-                    createImmediateTextNote()
-                },
-                onNewDrawing: {
-                    showNewItemSheet = false
-                    createImmediateDrawingNote()
-                },
-                onImportPhotos: {
-                    showNewItemSheet = false
-                    showPhotoPicker = true
-                },
-                onTakePhotos: {
-                    showNewItemSheet = false
+    private var newItemSheetView: some View {
+        NewItemSheet(
+            showDrawingOption: !isPhoneCompact,
+            onNewText: {
+                showNewItemSheet = false
+                createImmediateTextNote()
+            },
+            onNewDrawing: {
+                showNewItemSheet = false
+                createImmediateDrawingNote()
+            },
+            onImportPhotos: {
+                showNewItemSheet = false
+                showPhotoPicker = true
+            },
+            onTakePhotos: {
+                showNewItemSheet = false
 #if canImport(UIKit)
-                    if UIImagePickerController.isSourceTypeAvailable(.camera) {
-                        showCustomCamera = true
-                    } else {
-                        showCameraUnavailableAlert = true
-                    }
+                if UIImagePickerController.isSourceTypeAvailable(.camera) {
+                    showCustomCamera = true
+                } else {
+                    showPhotoPicker = true
+                }
 #else
-                    showCameraUnavailableAlert = true
+                showPhotoPicker = true
 #endif
-                },
-                onNewFolder: {
-                    showNewItemSheet = false
-                    showNewFolderAlert = true
-                }
-            )
-            .modifier(CompactDetentsIfAvailable(height: isPhoneCompact ? 360 : 410))
-            .presentationBackground(theme.palette.background)
-            .presentationCornerRadius(24)
-        }
-
-        // New folder alert
-        .alert("New folder", isPresented: $showNewFolderAlert) {
-            TextField("Folder name", text: $newFolderName)
-            Button("Create folder") { createFolder(name: newFolderName, parentID: currentFolderID) }
-            Button("Cancel", role: .cancel) {}
-        }
-
-        // Multi-photo folder name alert (import OR take)
-        .alert("Name this folder", isPresented: $showMultiPhotoFolderAlert) {
-            TextField("Folder name", text: $multiPhotoFolderName)
-            Button("Done") {
-                createFolderWithPhotos(
-                    name: multiPhotoFolderName,
-                    parentID: currentFolderID,
-                    photoDatas: pendingMultiPhotoDatas
-                )
+            },
+            onNewFolder: {
+                showNewItemSheet = false
+                showNewFolderAlert = true
             }
-        } message: {
-            Text("You selected \(pendingMultiPhotoDatas.count) photos. They’ll be saved as separate photo notes inside a new folder.")
-        }
+        )
+        .modifier(CompactDetentsIfAvailable(height: isPhoneCompact ? 360 : 410))
+        .presentationBackground(theme.palette.background)
+        .presentationCornerRadius(24)
+    }
 
-        // Create folder with note alert
-        .alert("New folder with note", isPresented: $showCreateFolderWithNoteAlert) {
-            TextField("Folder name", text: $folderWithNoteName)
-            Button("Create folder") { createFolderWithNote() }
-            Button("Cancel", role: .cancel) {
-                pendingNoteForFolder = nil
-                folderWithNoteName = ""
+    private var moveToFolderSheetView: some View {
+        FolderPickerSheet(
+            allFolders: aliveFolders,
+            onPick: { picked in
+                movePendingNote(to: picked.id)
+                showMoveToFolderSheet = false
+            },
+            onMoveToRoot: {
+                movePendingNote(to: nil)
+                showMoveToFolderSheet = false
+            },
+            onCancel: {
+                showMoveToFolderSheet = false
+            }
+        )
+        .modifier(LargeDetentsIfAvailable())
+    }
+
+    private var pinnedGridSheetView: some View {
+        PinnedNotesGridScreen(
+            notes: pinnedNotes,
+            cardSide: cardSide,
+            gridSpacing: gridSpacing,
+            onOpen: { note in
+                handleNoteTap(note)
+            },
+            onLongPress: { note in
+                tutorial.noteCardLongPressed(noteID: note.id)
+                openMenu(for: note)
+            }
+        )
+        .presentationBackground(theme.palette.background)
+        .presentationCornerRadius(24)
+    }
+
+    private var propertiesSheetView: some View {
+        PropertiesSheet(
+            note: propertiesNote,
+            folder: propertiesFolder,
+            onClose: {
+                DispatchQueue.main.async {
+                    showPropertiesSheet = false
+                }
+            }
+        )
+        .modifier(CompactDetentsIfAvailable(height: 520))
+    }
+
+    @ViewBuilder
+    private var libraryScrollContent: some View {
+        VStack(alignment: .leading, spacing: sectionSpacing) {
+            if currentFolderID != nil {
+                folderBreadcrumb
+            }
+
+            if currentFolderID != nil {
+                folderSectionContent
+            } else {
+                rootSectionContent
             }
         }
+        .padding(.horizontal, pageHPad)
+        .padding(.bottom, pageBottomPad)
+    }
 
-        // Move to folder sheet
-        .sheet(isPresented: $showMoveToFolderSheet) {
-            FolderPickerSheet(
-                allFolders: aliveFolders,
-                onPick: { picked in
-                    movePendingNote(to: picked.id)
-                    showMoveToFolderSheet = false
-                },
-                onMoveToRoot: {
-                    movePendingNote(to: nil)
-                    showMoveToFolderSheet = false
-                },
-                onCancel: {
-                    showMoveToFolderSheet = false
-                }
-            )
-            .modifier(LargeDetentsIfAvailable())
+    @ViewBuilder
+    private var folderSectionContent: some View {
+        if orderedFolderContents.isEmpty {
+            emptyStateView
+        } else {
+            orderedContentGrid
+        }
+    }
+
+    @ViewBuilder
+    private var rootSectionContent: some View {
+        if !pinnedNotes.isEmpty {
+            pinnedSection
         }
 
-        // Pinned grid sheet
-        .sheet(isPresented: $showPinnedGrid) {
-            PinnedNotesGridScreen(
-                notes: pinnedNotes,
+        if !recentContents.isEmpty {
+            recentSection
+        }
+
+        if !scopedFolders.isEmpty {
+            foldersSection
+        }
+
+        if !scopedNotes.isEmpty {
+            notesSection
+        }
+
+        if pinnedNotes.isEmpty, recentContents.isEmpty, scopedFolders.isEmpty, scopedNotes.isEmpty {
+            emptyStateView
+        }
+    }
+
+    @ViewBuilder
+    private var pinnedSection: some View {
+        SectionHeader(title: "Pinned", accessory: "View all pinned") {
+            showPinnedGrid = true
+        }
+
+        if isPhoneCompact {
+            CompactNotesGrid(
+                notes: Array(pinnedNotes.prefix(4)),
                 cardSide: cardSide,
                 gridSpacing: gridSpacing,
+                outline: theme.palette.outline,
+                columns: phoneGridColumns,
+                canDrag: canModifyExisting,
+                onLongPress: { note in
+                    tutorial.noteCardLongPressed(noteID: note.id)
+                    openMenu(for: note)
+                },
                 onOpen: { note in
                     handleNoteTap(note)
                 }
             )
-            .presentationBackground(theme.palette.background)
-            .presentationCornerRadius(24)
-        }
-
-        // Search popup on compact phones
-        .sheet(isPresented: $showSearchSheet) {
-            searchSheet
-        }
-
-        // Trash slider
-        .sheet(isPresented: $showTrashSlider) {
-            let isFolder = (pendingTrashFolder != nil)
-            triggeringDeleteSlider(isFolder: isFolder)
-        }
-
-        // Properties sheet (note OR folder)
-        .sheet(isPresented: $showPropertiesSheet) {
-            PropertiesSheet(
-                note: propertiesNote,
-                folder: propertiesFolder,
-                onClose: {
-                    DispatchQueue.main.async {
-                        showPropertiesSheet = false
-                    }
+        } else {
+            HorizontalPreviewRowSquare(
+                notes: Array(pinnedNotes.prefix(10)),
+                cardSide: cardSide,
+                outline: theme.palette.outline,
+                canDrag: canModifyExisting,
+                onLongPress: { note in
+                    tutorial.noteCardLongPressed(noteID: note.id)
+                    openMenu(for: note)
+                },
+                onOpen: { note in
+                    handleNoteTap(note)
                 }
             )
-                .modifier(CompactDetentsIfAvailable(height: 520))
         }
+    }
+
+    @ViewBuilder
+    private var recentSection: some View {
+        SectionHeader(title: "Recents")
+
+        HorizontalPreviewRowMixed(
+            items: Array(recentContents.prefix(isPhoneCompact ? 10 : 12)),
+            cardSide: cardSide,
+            outline: theme.palette.outline,
+            canDrag: canModifyExisting,
+            onLongPressNote: { note in
+                tutorial.noteCardLongPressed(noteID: note.id)
+                openMenu(for: note)
+            },
+            onLongPressFolder: { folder in
+                openFolderMenu(for: folder)
+            },
+            folderPreviewNote: { folder in
+                folderPreviewNote(folderID: folder.id)
+            },
+            folderCardStats: { folder in
+                folderCardStats(for: folder)
+            },
+            onOpenNote: { note in
+                handleNoteTap(note)
+            },
+            onOpenFolder: { folder in
+                handleFolderTap(folder)
+            }
+        )
+    }
+
+    @ViewBuilder
+    private var foldersSection: some View {
+        SectionHeader(title: "Folders", accessory: "New folder") {
+            showNewFolderAlert = true
+        }
+        folderGrid
+    }
+
+    @ViewBuilder
+    private var notesSection: some View {
+        SectionHeader(title: "Notes")
+        notesGrid
     }
 
     private var searchSheet: some View {
@@ -679,7 +727,10 @@ struct LibraryView: View {
                     .frame(maxWidth: 420)
             }
 
-            Button { showNewItemSheet = true } label: {
+            Button {
+                tutorial.createButtonTapped()
+                showNewItemSheet = true
+            } label: {
                 if isPhoneCompact {
                     Image(systemName: "plus")
                         .font(.system(size: 18, weight: .bold))
@@ -705,6 +756,7 @@ struct LibraryView: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(p.textPrimary)
+            .tutorialAnchor(.createButton)
         }
         .padding(.horizontal, pageHPad)
         .padding(.top, isPhoneCompact ? 10 : 16)
@@ -778,6 +830,12 @@ struct LibraryView: View {
                     .frame(width: cardSide, height: cardSide)
                     .contentShape(RoundedRectangle(cornerRadius: 26))
                     .onTapGesture { handleFolderTap(folder) }
+                    .plCardLongPressGesture {
+                        openFolderMenu(for: folder)
+                    }
+                    .plIf(tutorial.highlightedFolderID == folder.id) { view in
+                        view.tutorialAnchor(.folderCard)
+                    }
                     .plIf(canModifyExisting) { view in
                         view.draggable(dragStringForFolder(folder.id)) {
                             DragPreviewCard(outline: theme.palette.outline) {
@@ -804,6 +862,7 @@ struct LibraryView: View {
                                 // ✅ ADD (sync both the note + the destination folder)
                                 PaperLinkSyncManager.shared.enqueueNote(note, ctx: ctx)
                                 PaperLinkSyncManager.shared.enqueueFolder(folder, ctx: ctx)
+                                tutorial.noteDroppedIntoFolder(folderID: folder.id)
 
                                 return true
 
@@ -822,6 +881,7 @@ struct LibraryView: View {
                                 // ✅ ADD (sync both the moved folder + the destination folder)
                                 PaperLinkSyncManager.shared.enqueueFolder(moving, ctx: ctx)
                                 PaperLinkSyncManager.shared.enqueueFolder(folder, ctx: ctx)
+                                tutorial.noteDroppedIntoFolder(folderID: folder.id)
 
                                 return true
 
@@ -853,10 +913,17 @@ struct LibraryView: View {
                     .frame(width: cardSide, height: cardSide)
                     .contentShape(RoundedRectangle(cornerRadius: 26))
                     .onTapGesture { handleNoteTap(note) }
+                    .plCardLongPressGesture {
+                        tutorial.noteCardLongPressed(noteID: note.id)
+                        openMenu(for: note)
+                    }
                     .plIf(canModifyExisting) { view in
                         view.draggable(dragStringForNote(note.id))
                     }
                     .menuAnchor(id: note.id, kind: .note)
+                    .plIf(tutorial.highlightedNoteID == note.id) { view in
+                        view.tutorialAnchor(.noteCard)
+                    }
             }
         }
     }
@@ -874,6 +941,12 @@ struct LibraryView: View {
                 }
                 .contentShape(RoundedRectangle(cornerRadius: 26))
                 .onTapGesture { handleFolderTap(folder) }
+                .plCardLongPressGesture {
+                    openFolderMenu(for: folder)
+                }
+                .plIf(tutorial.highlightedFolderID == folder.id) { view in
+                    view.tutorialAnchor(.folderCard)
+                }
                 .plIf(canModifyExisting) { view in
                     view.draggable(dragStringForFolder(folder.id)) {
                         DragPreviewCard(outline: theme.palette.outline) {
@@ -898,6 +971,7 @@ struct LibraryView: View {
                             try? ctx.save()
                             PaperLinkSyncManager.shared.enqueueNote(note, ctx: ctx)
                             PaperLinkSyncManager.shared.enqueueFolder(folder, ctx: ctx)
+                            tutorial.noteDroppedIntoFolder(folderID: folder.id)
                             return true
 
                         case "folder":
@@ -912,6 +986,7 @@ struct LibraryView: View {
                             try? ctx.save()
                             PaperLinkSyncManager.shared.enqueueFolder(moving, ctx: ctx)
                             PaperLinkSyncManager.shared.enqueueFolder(folder, ctx: ctx)
+                            tutorial.noteDroppedIntoFolder(folderID: folder.id)
                             return true
 
                         default:
@@ -928,10 +1003,17 @@ struct LibraryView: View {
                 }
                 .contentShape(RoundedRectangle(cornerRadius: 26))
                 .onTapGesture { handleNoteTap(note) }
+                .plCardLongPressGesture {
+                    tutorial.noteCardLongPressed(noteID: note.id)
+                    openMenu(for: note)
+                }
                 .plIf(canModifyExisting) { view in
                     view.draggable(dragStringForNote(note.id))
                 }
                 .menuAnchor(id: note.id, kind: .note)
+                .plIf(tutorial.highlightedNoteID == note.id) { view in
+                    view.tutorialAnchor(.noteCard)
+                }
         }
     }
 
@@ -977,6 +1059,7 @@ struct LibraryView: View {
         showAnchoredMenu = false
         menuNote = nil
         menuFolder = nil
+        tutorial.menuClosed()
     }
 
     // MARK: - Open properties for current menu item
@@ -1014,6 +1097,7 @@ struct LibraryView: View {
             pendingSingleTapWorkItem = nil
             lastTapID = nil
             openMenu(for: note)
+            tutorial.noteCardDoubleTapped(noteID: note.id)
             return
         }
 
@@ -1252,6 +1336,12 @@ struct LibraryView: View {
         }
 
         presentNewNote(note)
+
+        if kind == .text {
+            tutorial.textNoteCreated(noteID: note.id)
+        } else if kind == .photo {
+            tutorial.photoNoteCreated(noteID: note.id)
+        }
     }
 
     @MainActor
@@ -1264,6 +1354,7 @@ struct LibraryView: View {
         try? ctx.save()
 
         PaperLinkSyncManager.shared.enqueueFolder(f, ctx: ctx)
+        tutorial.folderCreated(folderID: f.id)
 
         newFolderName = ""
 
@@ -1585,6 +1676,7 @@ struct LibraryView: View {
                 onReadingMode: {
                     guard let f = menuFolder else { return }
                     startReadingMode(for: f.id)
+                    tutorial.readingModeOpened()
                     closeMenu()
                 },
                 onMoveToTrashFolder: {
@@ -1663,6 +1755,7 @@ struct LibraryView: View {
 
 private struct CompactNotesGrid: View {
     @EnvironmentObject private var theme: PLThemeStore
+    @EnvironmentObject private var tutorial: PLTutorialCoordinator
 
     let notes: [PLNote]
     let cardSide: CGFloat
@@ -1670,10 +1763,10 @@ private struct CompactNotesGrid: View {
     let outline: Color
     let columns: Int
     let canDrag: Bool
+    let onLongPress: ((PLNote) -> Void)?
     let onOpen: (PLNote) -> Void
 
     var body: some View {
-        // ✅ Fixed-width columns so cards don't get "pushed apart"
         let colCount = max(2, columns)
         let cols = Array(
             repeating: GridItem(.fixed(cardSide), spacing: gridSpacing, alignment: .leading),
@@ -1683,10 +1776,16 @@ private struct CompactNotesGrid: View {
         LazyVGrid(columns: cols, alignment: .leading, spacing: gridSpacing) {
             ForEach(notes) { note in
                 NoteCardSquare(note: note)
-                    .frame(width: cardSide, height: cardSide) // ✅ TRUE square
+                    .frame(width: cardSide, height: cardSide)
                     .clipped()
                     .contentShape(RoundedRectangle(cornerRadius: 26))
                     .onTapGesture { onOpen(note) }
+                    .plCardLongPressGesture {
+                        onLongPress?(note)
+                    }
+                    .plIf(tutorial.highlightedNoteID == note.id) { view in
+                        view.tutorialAnchor(.noteCard)
+                    }
                     .plIf(canDrag) { view in
                         view.draggable("note:\(note.id.uuidString)") {
                             DragPreviewCard(outline: outline) {
@@ -1986,11 +2085,13 @@ private extension UIImage {
 
 struct HorizontalPreviewRowSquare: View {
     @EnvironmentObject private var theme: PLThemeStore // ✅ add
+    @EnvironmentObject private var tutorial: PLTutorialCoordinator
 
     let notes: [PLNote]
     let cardSide: CGFloat
     let outline: Color
     let canDrag: Bool
+    let onLongPress: ((PLNote) -> Void)?
     let onOpen: (PLNote) -> Void
 
     var body: some View {
@@ -2001,6 +2102,12 @@ struct HorizontalPreviewRowSquare: View {
                         .frame(width: cardSide, height: cardSide)
                         .contentShape(RoundedRectangle(cornerRadius: 26))
                         .onTapGesture { onOpen(note) }
+                        .plCardLongPressGesture {
+                            onLongPress?(note)
+                        }
+                        .plIf(tutorial.highlightedNoteID == note.id) { view in
+                            view.tutorialAnchor(.noteCard)
+                        }
                         .plIf(canDrag) { view in
                             view.draggable("note:\(note.id.uuidString)") {
                                 DragPreviewCard(outline: outline) {
@@ -2020,11 +2127,14 @@ struct HorizontalPreviewRowSquare: View {
 
 fileprivate struct HorizontalPreviewRowMixed: View {
     @EnvironmentObject private var theme: PLThemeStore
+    @EnvironmentObject private var tutorial: PLTutorialCoordinator
 
     let items: [LibraryView.OrderedFolderContent]
     let cardSide: CGFloat
     let outline: Color
     let canDrag: Bool
+    let onLongPressNote: ((PLNote) -> Void)?
+    let onLongPressFolder: ((PLFolder) -> Void)?
     let folderPreviewNote: (PLFolder) -> PLNote?
     let folderCardStats: (PLFolder) -> FolderCardStats
     let onOpenNote: (PLNote) -> Void
@@ -2043,6 +2153,9 @@ fileprivate struct HorizontalPreviewRowMixed: View {
                             .frame(width: cardSide, height: cardSide)
                             .contentShape(RoundedRectangle(cornerRadius: 26))
                             .onTapGesture { onOpenFolder(folder) }
+                            .plCardLongPressGesture {
+                                onLongPressFolder?(folder)
+                            }
                             .plIf(canDrag) { view in
                                 view.draggable("folder:\(folder.id.uuidString)") {
                                     DragPreviewCard(outline: outline) {
@@ -2058,6 +2171,12 @@ fileprivate struct HorizontalPreviewRowMixed: View {
                             .frame(width: cardSide, height: cardSide)
                             .contentShape(RoundedRectangle(cornerRadius: 26))
                             .onTapGesture { onOpenNote(note) }
+                            .plCardLongPressGesture {
+                                onLongPressNote?(note)
+                            }
+                            .plIf(tutorial.highlightedNoteID == note.id) { view in
+                                view.tutorialAnchor(.noteCard)
+                            }
                             .plIf(canDrag) { view in
                                 view.draggable("note:\(note.id.uuidString)") {
                                     DragPreviewCard(outline: outline) {
@@ -2433,6 +2552,7 @@ struct AnchoredMenuLayer: View {
                 GeometryReader { geo in
                     menuView
                         .frame(width: menuWidth)
+                        .tutorialAnchor(kind == .note ? .noteMenu : .folderMenu)
                         .position(menuPosition(in: geo.size))
                 }
                 .ignoresSafeArea()
@@ -2779,6 +2899,7 @@ struct FolderRow: View {
 
 struct ReadingModeScreen: View {
     @EnvironmentObject private var theme: PLThemeStore
+    @EnvironmentObject private var tutorial: PLTutorialCoordinator
 
     let notes: [PLNote]
     let startIndex: Int
@@ -2805,6 +2926,7 @@ struct ReadingModeScreen: View {
                             .clipShape(RoundedRectangle(cornerRadius: 16))
                     }
                     .buttonStyle(.plain)
+                    .tutorialAnchor(.readingModeDoneButton)
 
                     Text(title)
                         .font(.system(size: 18, weight: .bold))
@@ -2857,6 +2979,14 @@ struct ReadingModeScreen: View {
                     .padding(.horizontal, 18)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
                 }
+            }
+        }
+        .overlayPreferenceValue(PLTutorialAnchorPreferenceKey.self) { anchors in
+            if tutorial.isActive {
+                TutorialFlowView(
+                    anchors: anchors,
+                    allowedTargets: [.readingModeDoneButton]
+                )
             }
         }
         .onAppear {
@@ -3055,6 +3185,7 @@ struct CameraPicker: UIViewControllerRepresentable {
 
 struct NewItemSheet: View {
     @EnvironmentObject private var theme: PLThemeStore
+    @EnvironmentObject private var tutorial: PLTutorialCoordinator
 
     let showDrawingOption: Bool
     let onNewText: () -> Void
@@ -3064,39 +3195,50 @@ struct NewItemSheet: View {
     let onNewFolder: () -> Void
 
     var body: some View {
-        let p = theme.palette
+        GeometryReader { proxy in
+            let p = theme.palette
+            let topPad = max(14, proxy.safeAreaInsets.top + 8)
 
-        VStack(spacing: 14) {
-            Capsule()
-                .fill(p.textPrimary.opacity(0.18))
-                .frame(width: 44, height: 5)
-                .padding(.top, 10)
+            VStack(spacing: 14) {
+                Capsule()
+                    .fill(p.textPrimary.opacity(0.18))
+                    .frame(width: 44, height: 5)
+                    .padding(.top, topPad)
 
-            Text("New")
-                .font(.system(size: 22, weight: .bold))
-                .foregroundStyle(p.textPrimary)
+                Text("New")
+                    .font(.system(size: 22, weight: .bold))
+                    .foregroundStyle(p.textPrimary)
 
-            VStack(spacing: 10) {
-                sheetButton("Text note", systemImage: "doc.text", action: onNewText)
+                VStack(spacing: 10) {
+                    sheetButton("Text note", systemImage: "doc.text", tutorialTarget: .textNoteButton, action: onNewText)
 
-                if showDrawingOption {
-                    sheetButton("Drawing note", systemImage: "pencil.tip", action: onNewDrawing)
+                    if showDrawingOption {
+                        sheetButton("Drawing note", systemImage: "pencil.tip", action: onNewDrawing)
+                    }
+
+                    sheetButton("Import photo(s)", systemImage: "photo.on.rectangle", action: onImportPhotos)
+                    sheetButton("Take photo(s)", systemImage: "camera", tutorialTarget: .photoNoteButton, action: onTakePhotos)
+                    sheetButton("New folder", systemImage: "folder.badge.plus", tutorialTarget: .folderButton, action: onNewFolder)
                 }
+                .padding(.horizontal, 16)
 
-                sheetButton("Import photo(s)", systemImage: "photo.on.rectangle", action: onImportPhotos)
-                sheetButton("Take photo(s)", systemImage: "camera", action: onTakePhotos)
-                sheetButton("New folder", systemImage: "folder.badge.plus", action: onNewFolder)
+                Spacer(minLength: 0)
             }
-            .padding(.horizontal, 16)
-
-            Spacer(minLength: 0)
+            .padding(.bottom, 12)
+            .frame(width: proxy.size.width, height: proxy.size.height)
+            .background(p.background.ignoresSafeArea())
+            .overlayPreferenceValue(PLTutorialAnchorPreferenceKey.self) { anchors in
+                if tutorial.isActive {
+                    TutorialFlowView(
+                        anchors: anchors,
+                        allowedTargets: [.textNoteButton, .photoNoteButton, .folderButton]
+                    )
+                }
+            }
         }
-        .padding(.bottom, 12)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(p.background.ignoresSafeArea())
     }
 
-    private func sheetButton(_ title: String, systemImage: String, action: @escaping () -> Void) -> some View {
+    private func sheetButton(_ title: String, systemImage: String, tutorialTarget: PLTutorialTarget? = nil, action: @escaping () -> Void) -> some View {
         let p = theme.palette
 
         return Button(action: action) {
@@ -3124,6 +3266,7 @@ struct NewItemSheet: View {
         }
         .buttonStyle(.plain)
         .foregroundStyle(p.textPrimary)
+        .tutorialAnchorIf(tutorialTarget)
     }
 }
 
@@ -3337,12 +3480,14 @@ struct PropertiesSheet: View {
 
 struct PinnedNotesGridScreen: View {
     @EnvironmentObject private var theme: PLThemeStore
+    @EnvironmentObject private var tutorial: PLTutorialCoordinator
     @Environment(\.dismiss) private var dismiss
 
     let notes: [PLNote]
     let cardSide: CGFloat
     let gridSpacing: CGFloat
     let onOpen: (PLNote) -> Void
+    let onLongPress: ((PLNote) -> Void)?
 
     var body: some View {
         let p = theme.palette
@@ -3385,6 +3530,12 @@ struct PinnedNotesGridScreen: View {
                                 .frame(width: cardSide, height: cardSide)
                                 .contentShape(RoundedRectangle(cornerRadius: 26))
                                 .onTapGesture { onOpen(note) }
+                                .plCardLongPressGesture {
+                                    onLongPress?(note)
+                                }
+                                .plIf(tutorial.highlightedNoteID == note.id) { view in
+                                    view.tutorialAnchor(.noteCard)
+                                }
                         }
                     }
                     .padding(.horizontal, 18)
@@ -3402,6 +3553,22 @@ private extension View {
     func plIf<Content: View>(_ condition: Bool, transform: (Self) -> Content) -> some View {
         if condition {
             transform(self)
+        } else {
+            self
+        }
+    }
+
+    func plCardLongPressGesture(action: @escaping () -> Void) -> some View {
+        highPriorityGesture(
+            LongPressGesture(minimumDuration: 0.35, maximumDistance: 18)
+                .onEnded { _ in action() }
+        )
+    }
+
+    @ViewBuilder
+    func tutorialAnchorIf(_ target: PLTutorialTarget?) -> some View {
+        if let target {
+            tutorialAnchor(target)
         } else {
             self
         }

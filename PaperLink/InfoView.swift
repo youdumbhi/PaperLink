@@ -10,6 +10,7 @@ import SwiftData
 
 struct InfoView: View {
     @EnvironmentObject private var theme: PLThemeStore
+    @EnvironmentObject private var auth: PLAuthStore
     @Environment(\.plDockedSidebarInset) private var dockedSidebarInset
     @Query(sort: \PLNote.createdAt, order: .reverse) private var allNotes: [PLNote]
 
@@ -69,7 +70,11 @@ struct InfoView: View {
                         infoRow(title: "All notes", value: "\(displayedCounts.all)")
                         infoRow(title: "Platform", value: UIDevice.current.userInterfaceIdiom == .phone ? "iPhone" : "iPad")
 
-                        if loadingStats {
+                        if auth.isGuestSession {
+                            Text("Cloud stats are disabled in testing mode.")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(p.textSecondary)
+                        } else if loadingStats {
                             Text("Refreshing stats from server…")
                                 .font(.system(size: 12, weight: .semibold))
                                 .foregroundStyle(p.textSecondary)
@@ -94,7 +99,7 @@ struct InfoView: View {
             }
             .padding(22)
         }
-        .task {
+        .task(id: auth.canUseCloudSync) {
             await refreshStats()
         }
     }
@@ -134,6 +139,13 @@ struct InfoView: View {
         guard !loadingStats else { return }
         loadingStats = true
         defer { loadingStats = false }
+
+        guard auth.canUseCloudSync else {
+            serverStorageBytes = nil
+            serverNoteCounts = nil
+            statsError = nil
+            return
+        }
 
         do {
             let usage = try await PaperLinkSyncManager.shared.fetchUsageStats()

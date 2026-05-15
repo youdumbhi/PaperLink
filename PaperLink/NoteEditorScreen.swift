@@ -34,6 +34,12 @@ import CoreImage
 import UIKit
 #endif
 
+private func plDismissActiveTextInput() {
+#if canImport(UIKit)
+    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+#endif
+}
+
 enum PLEditMode: String, CaseIterable {
     case ink
     case highlight
@@ -157,6 +163,7 @@ private let plTextSizePresets: [TextSizePreset] = [
 
 struct NoteEditorScreen: View {
     @EnvironmentObject private var theme: PLThemeStore
+    @EnvironmentObject private var tutorial: PLTutorialCoordinator
     @AppStorage("pl_apple_pencil_only_draw") private var applePencilOnlyDraw: Bool = false
     @AppStorage(PLDrawingPaletteDefaults.Key.autoMinimize) private var drawingPaletteAutoMinimize: Bool = PLDrawingPaletteDefaults.autoMinimize
     @AppStorage(PLTextDefaults.Key.fontSize) private var textFontSize: Double = PLTextDefaults.fontSize
@@ -235,10 +242,15 @@ struct NoteEditorScreen: View {
     @State private var drawingPaletteIsDragging: Bool = false
     @State private var drawingPaletteHideWorkItem: DispatchWorkItem? = nil
     @State private var noteCanvasSize: CGSize = .zero
+    @State private var keyboardBottomInset: CGFloat = 0
 
     // Undo stacks
     @State private var inkUndoStack: [Data] = []
     @State private var highlightUndoStack: [Data] = []
+    @State private var inkRedoStack: [Data] = []
+    @State private var highlightRedoStack: [Data] = []
+    @State private var suppressInkUndoRecording: Bool = false
+    @State private var suppressHighlightUndoRecording: Bool = false
     @State private var lastInkData: Data = PKDrawing().dataRepresentation()
     @State private var lastHighlightData: Data = PKDrawing().dataRepresentation()
 
@@ -322,7 +334,16 @@ struct NoteEditorScreen: View {
     }
 
     private var usesCompactTopBar: Bool {
-        isPhone && currentKind != .text
+        currentKind == .text || (isPhone && currentKind != .text)
+    }
+
+    private var editorTint: Color {
+        isPhone ? theme.palette.textPrimary : theme.palette.accent
+    }
+
+    private var selectedTextActionFill: Color {
+        let p = theme.palette
+        return isPhone ? p.textPrimary.opacity(0.12) : p.accent.opacity(0.62)
     }
 
     // iPhone limitations:
@@ -532,6 +553,14 @@ struct NoteEditorScreen: View {
     // MARK: - Body
     var body: some View {
         editorRoot
+            .overlayPreferenceValue(PLTutorialAnchorPreferenceKey.self) { anchors in
+                if tutorial.isActive {
+                    TutorialFlowView(
+                        anchors: anchors,
+                        allowedTargets: [.noteEditorBody, .noteEditorBackButton]
+                    )
+                }
+            }
             .onAppear {
                 bootstrap()
                 if usesFloatingDrawingPalette {
@@ -567,10 +596,12 @@ struct NoteEditorScreen: View {
             }
             .onChange(of: inkData) { _, newValue in
                 guard !isLocked else { return }
+                guard !suppressInkUndoRecording else { return }
                 pushInkUndoIfNeeded(newValue)
             }
             .onChange(of: highlightData) { _, newValue in
                 guard !isLocked else { return }
+                guard !suppressHighlightUndoRecording else { return }
                 pushHighlightUndoIfNeeded(newValue)
             }
             .onChange(of: drawingPaperStyle) { _, newStyle in
@@ -606,7 +637,6 @@ struct NoteEditorScreen: View {
             .onDisappear {
                 cancelDrawingPaletteAutoMinimize()
             }
-            .ignoresSafeArea(.keyboard, edges: .bottom)
     }
 
     private var editorRoot: some View {
@@ -698,6 +728,7 @@ struct NoteEditorScreen: View {
                     .background(Color.white.opacity(0.001))
             }
             .buttonStyle(.plain)
+            .tutorialAnchor(.noteEditorBackButton)
 
             Text(titleText.isEmpty ? "Untitled" : titleText)
                 .font(.system(size: 22, weight: .bold))
@@ -855,6 +886,8 @@ struct NoteEditorScreen: View {
                     markerWidth: $markerWidth,
                     drawWithFinger: drawWithFingerBinding,
                     autoMinimize: $drawingPaletteAutoMinimize,
+                    canUndo: canUndoCurrentState,
+                    canRedo: canRedoCurrentState,
                     onSelectTool: { tool in
                         drawTool = tool
                         if tool == .marker {
@@ -868,6 +901,10 @@ struct NoteEditorScreen: View {
                         performUndo()
                         bumpDrawingPaletteActivity()
                     },
+                    onRedo: {
+                        performRedo()
+                        bumpDrawingPaletteActivity()
+                    },
                     onActivity: {
                         bumpDrawingPaletteActivity()
                     }
@@ -875,6 +912,13 @@ struct NoteEditorScreen: View {
                 .zIndex(2)
             }
         }
+        .simultaneousGesture(
+            TapGesture().onEnded {
+                if currentKind != .text {
+                    plDismissActiveTextInput()
+                }
+            }
+        )
         .background(
             GeometryReader { geo in
                 Color.clear
@@ -945,6 +989,7 @@ struct NoteEditorScreen: View {
                 .clipShape(RoundedRectangle(cornerRadius: 18))
         }
         .buttonStyle(.plain)
+        .tutorialAnchor(.noteEditorBackButton)
 
     }
 
@@ -987,12 +1032,17 @@ struct NoteEditorScreen: View {
     }
 
     private var titlePillLandscape: some View {
-        TextField("Title", text: $titleText)
+        let p = theme.palette
+
+        return TextField("Title", text: $titleText, axis: .vertical)
             .font(.system(size: 17, weight: .bold))
             .padding(.horizontal, 12)
-            .frame(height: titlePillHeight)
-            .foregroundStyle(.black)
-            .tint(.black)
+            .frame(minHeight: 54, alignment: .leading)
+            .lineLimit(1...3)
+            .fixedSize(horizontal: false, vertical: true)
+            .foregroundStyle(p.textPrimary)
+            .tint(editorTint)
+            .textFieldStyle(.plain)
             .shadow(color: .white.opacity(1.0), radius: 1.5, x: 0, y: 1)
             .shadow(color: .black.opacity(0.18), radius: 3, x: 0, y: 1)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1133,6 +1183,8 @@ struct NoteEditorScreen: View {
             lastHighlightData = highlightData
             inkUndoStack = []
             highlightUndoStack = []
+            inkRedoStack = []
+            highlightRedoStack = []
 
             snapshot = Snapshot(
                 title: titleText,
@@ -1180,13 +1232,13 @@ struct NoteEditorScreen: View {
                 draftPhotoUIImage = UIImage(data: data)
             }
 #endif
-            inkData = PKDrawing().dataRepresentation()
-            highlightData = PKDrawing().dataRepresentation()
+            applyInkDataProgrammatically(PKDrawing().dataRepresentation())
+            applyHighlightDataProgrammatically(PKDrawing().dataRepresentation())
 
-            lastInkData = inkData
-            lastHighlightData = highlightData
             inkUndoStack = []
             highlightUndoStack = []
+            inkRedoStack = []
+            highlightRedoStack = []
             applyAdaptiveDefaultInkColorIfNeeded(force: true)
         }
     }
@@ -1235,14 +1287,18 @@ struct NoteEditorScreen: View {
                     .foregroundStyle((p.textPrimary == .black ? Color.white : Color.black).opacity(0.92))
             }
             .buttonStyle(.plain)
+            .tutorialAnchor(.noteEditorBackButton)
 
-            TextField("Title", text: $titleText)
+            TextField("Title", text: $titleText, axis: .vertical)
                 .font(.system(size: 19, weight: .bold))
                 .padding(.leading, 6)
                 .padding(.trailing, 8)
-                .frame(height: 50)
+                .frame(minHeight: 58, alignment: .leading)
+                .lineLimit(1...3)
+                .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .foregroundStyle(.black)
+                .tint(p.accent)
                 .shadow(color: .white.opacity(1.0), radius: 1.5, x: 0, y: 1)
                 .shadow(color: .black.opacity(0.18), radius: 3, x: 0, y: 1)
                 .allowsHitTesting(!(isLocked || readingMode))
@@ -1396,6 +1452,7 @@ struct NoteEditorScreen: View {
                         .foregroundStyle((p.textPrimary == .black ? Color.white : Color.black).opacity(0.92))
                 }
                 .buttonStyle(.plain)
+                .tutorialAnchor(.noteEditorBackButton)
 
                 Spacer(minLength: 0)
 
@@ -1408,26 +1465,33 @@ struct NoteEditorScreen: View {
                 compactTrailingActions
             }
 
-            TextField("Title", text: $titleText)
-                .font(.system(size: 18, weight: .bold))
-                .padding(.horizontal, 12)
-                .frame(height: 46)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 15)
-                        .stroke(p.outline, lineWidth: 1)
-                )
-                .foregroundStyle(.black)
-                .shadow(color: .white.opacity(1.0), radius: 1.5, x: 0, y: 1)
-                .shadow(color: .black.opacity(0.18), radius: 3, x: 0, y: 1)
-                .allowsHitTesting(!(isLocked || readingMode))
-                .onSubmit {
-                    guard let n = note, !readingMode, !isLocked else { return }
-                    n.title = titleText
-                    n.updatedAt = .now
-                    try? ctx.save()
-                    PaperLinkSyncManager.shared.enqueueNote(n, ctx: ctx)
-                }
+            if isPhone {
+                titlePillLandscape
+            } else {
+                TextField("Title", text: $titleText, axis: .vertical)
+                    .font(.system(size: 18, weight: .bold))
+                    .padding(.horizontal, 12)
+                    .frame(minHeight: 54, alignment: .leading)
+                    .lineLimit(1...3)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 15)
+                            .stroke(p.outline, lineWidth: 1)
+                    )
+                    .foregroundStyle(.black)
+                    .tint(p.accent)
+                    .shadow(color: .white.opacity(1.0), radius: 1.5, x: 0, y: 1)
+                    .shadow(color: .black.opacity(0.18), radius: 3, x: 0, y: 1)
+                    .allowsHitTesting(!(isLocked || readingMode))
+                    .onSubmit {
+                        guard let n = note, !readingMode, !isLocked else { return }
+                        n.title = titleText
+                        n.updatedAt = .now
+                        try? ctx.save()
+                        PaperLinkSyncManager.shared.enqueueNote(n, ctx: ctx)
+                    }
+            }
 
         }
     }
@@ -1557,6 +1621,17 @@ struct NoteEditorScreen: View {
         max(textFontSize + 8, textFontSize * 1.35)
     }
 
+    private var textEditorTopSpacer: CGFloat {
+        if isPhone {
+            return isPhoneLandscape ? 114 : 176
+        }
+        return shouldShowToolRail ? 104 : 84
+    }
+
+    private var textEditorRailInset: CGFloat {
+        shouldShowToolRail ? 136 : 0
+    }
+
     private var backLabelText: String {
         if isDraft { return "Cancel" }
         return "Back"
@@ -1568,6 +1643,8 @@ struct NoteEditorScreen: View {
     }
 
     private func handleBackPressed() {
+        tutorial.backPressed()
+
         if newlyCreated {
             if shouldDeleteNewNoteOnExit() {
                 deleteNewlyCreatedNoteAndDismiss()
@@ -1620,6 +1697,8 @@ struct NoteEditorScreen: View {
 
         inkUndoStack = []
         highlightUndoStack = []
+        inkRedoStack = []
+        highlightRedoStack = []
         lastInkData = inkData
         lastHighlightData = highlightData
     }
@@ -1709,6 +1788,7 @@ struct NoteEditorScreen: View {
                 ToolHeader(icon: "textformat", title: "Text")
                 Spacer()
                 undoButton
+                redoButton
             }
             .frame(width: 96)
             .padding(.top, 6)
@@ -1802,7 +1882,7 @@ struct NoteEditorScreen: View {
                     )
 
                     undoButton
-                        .padding(.bottom, 6)
+                    redoButton
                 }
             }
             .frame(width: 96)
@@ -1909,8 +1989,34 @@ struct NoteEditorScreen: View {
         }
         .buttonStyle(.plain)
         .foregroundStyle(p.textPrimary)
-        .disabled(isLocked)
-        .opacity(isLocked ? 0.35 : 1.0)
+        .disabled(!canUndoCurrentState)
+        .opacity(canUndoCurrentState ? 1.0 : 0.35)
+    }
+
+    private var redoButton: some View {
+        let p = theme.palette
+
+        return Button { performRedo() } label: {
+            VStack(spacing: 6) {
+                Image(systemName: "arrow.uturn.forward")
+                    .font(.system(size: 18, weight: .bold))
+                    .frame(width: 56, height: 56)
+                    .background(p.railButton)
+                    .clipShape(RoundedRectangle(cornerRadius: 18))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 18)
+                            .stroke(p.outline, lineWidth: 1)
+                    )
+
+                Text("Redo")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(p.textSecondary)
+            }
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(p.textPrimary)
+        .disabled(!canRedoCurrentState)
+        .opacity(canRedoCurrentState ? 1.0 : 0.35)
     }
 
     private func performUndo() {
@@ -1922,22 +2028,104 @@ struct NoteEditorScreen: View {
 
         case .drawing:
             if let prev = inkUndoStack.popLast() {
-                inkData = prev
-                lastInkData = prev
+                inkRedoStack.append(inkData)
+                trimStack(&inkRedoStack)
+                applyInkDataProgrammatically(prev)
             }
 
         case .photo:
             if mode == .highlight {
                 if let prev = highlightUndoStack.popLast() {
-                    highlightData = prev
-                    lastHighlightData = prev
+                    highlightRedoStack.append(highlightData)
+                    trimStack(&highlightRedoStack)
+                    applyHighlightDataProgrammatically(prev)
                 }
             } else {
                 if let prev = inkUndoStack.popLast() {
-                    inkData = prev
-                    lastInkData = prev
+                    inkRedoStack.append(inkData)
+                    trimStack(&inkRedoStack)
+                    applyInkDataProgrammatically(prev)
                 }
             }
+        }
+    }
+
+    private func performRedo() {
+        guard !isLocked else { return }
+
+        switch currentKind {
+        case .text:
+            undoManager?.redo()
+
+        case .drawing:
+            if let next = inkRedoStack.popLast() {
+                inkUndoStack.append(inkData)
+                trimStack(&inkUndoStack)
+                applyInkDataProgrammatically(next)
+            }
+
+        case .photo:
+            if mode == .highlight {
+                if let next = highlightRedoStack.popLast() {
+                    highlightUndoStack.append(highlightData)
+                    trimStack(&highlightUndoStack)
+                    applyHighlightDataProgrammatically(next)
+                }
+            } else {
+                if let next = inkRedoStack.popLast() {
+                    inkUndoStack.append(inkData)
+                    trimStack(&inkUndoStack)
+                    applyInkDataProgrammatically(next)
+                }
+            }
+        }
+    }
+
+    private func applyInkDataProgrammatically(_ newValue: Data) {
+        suppressInkUndoRecording = true
+        inkData = newValue
+        lastInkData = newValue
+        DispatchQueue.main.async {
+            self.suppressInkUndoRecording = false
+        }
+    }
+
+    private func applyHighlightDataProgrammatically(_ newValue: Data) {
+        suppressHighlightUndoRecording = true
+        highlightData = newValue
+        lastHighlightData = newValue
+        DispatchQueue.main.async {
+            self.suppressHighlightUndoRecording = false
+        }
+    }
+
+    private func trimStack(_ stack: inout [Data]) {
+        if stack.count > 40 {
+            stack.removeFirst(stack.count - 40)
+        }
+    }
+
+    private var canUndoCurrentState: Bool {
+        guard !isLocked else { return false }
+        switch currentKind {
+        case .text:
+            return undoManager?.canUndo ?? false
+        case .drawing:
+            return !inkUndoStack.isEmpty
+        case .photo:
+            return mode == .highlight ? !highlightUndoStack.isEmpty : !inkUndoStack.isEmpty
+        }
+    }
+
+    private var canRedoCurrentState: Bool {
+        guard !isLocked else { return false }
+        switch currentKind {
+        case .text:
+            return undoManager?.canRedo ?? false
+        case .drawing:
+            return !inkRedoStack.isEmpty
+        case .photo:
+            return mode == .highlight ? !highlightRedoStack.isEmpty : !inkRedoStack.isEmpty
         }
     }
 
@@ -1951,41 +2139,105 @@ struct NoteEditorScreen: View {
         }
     }
 
-    private var textEditor: some View {
+    private var textEditor: AnyView {
         let p = theme.palette
 
-        return VStack(spacing: 0) {
-            if !isLocked {
-                textQuickActionsBar
-                    .padding(.horizontal, 16)
-                    .padding(.top, 14)
-                    .padding(.bottom, 12)
-
-                Rectangle()
-                    .fill(p.outline.opacity(0.9))
-                    .frame(height: 1)
+        return AnyView(
+            VStack(spacing: 0) {
+                textEditorTopChrome()
+                textEditorBodyScroll()
             }
-
-            ScrollView {
-                VStack(spacing: 10) {
-                    ForEach($textBlocks) { $block in
-                        textBlockRow(block: $block)
-                    }
+            .padding(.leading, textEditorRailInset)
+            .background(p.card.opacity(0.32))
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .onAppear { ensureTextBlocksSeeded() }
+            .onChange(of: selectedTextBlockID) { _, newID in
+                guard !isLocked else { return }
+                focusedTextBlockID = newID
+            }
+            .onChange(of: focusedTextBlockID) { _, newID in
+                if let newID { selectedTextBlockID = newID }
+            }
+            .onChange(of: textBlocks) { _, _ in
+                syncDraftTextFromBlocks()
+                if !textBodyFromBlocks(textBlocks).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    tutorial.typedText()
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 18)
             }
-            .foregroundStyle(p.textPrimary)
+        )
+    }
+
+    private func textEditorTopChrome() -> AnyView {
+        let p = theme.palette
+
+        return AnyView(
+            VStack(spacing: 0) {
+                Color.clear
+                    .frame(height: textEditorTopSpacer)
+
+                if !isLocked {
+                    textQuickActionsBar
+                        .padding(.horizontal, 16)
+                        .padding(.top, 14)
+                        .padding(.bottom, 12)
+
+                    Rectangle()
+                        .fill(p.outline.opacity(0.9))
+                        .frame(height: 1)
+                }
+            }
+        )
+    }
+
+    private func textEditorBodyScroll() -> AnyView {
+        let p = theme.palette
+
+        return AnyView(
+            ScrollViewReader { scrollProxy in
+                ScrollView {
+                    textEditorBlocks()
+                }
+                .foregroundStyle(p.textPrimary)
+                .tutorialAnchor(.noteEditorBody)
+                .scrollDismissesKeyboard(.interactively)
+                .onChange(of: focusedTextBlockID) { _, newID in
+                    scrollFocusedTextBlock(to: newID, using: scrollProxy)
+                }
+                .onChange(of: keyboardBottomInset) { _, _ in
+                    scrollFocusedTextBlock(to: focusedTextBlockID, using: scrollProxy)
+                }
+                .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { notification in
+                    updateKeyboardBottomInset(from: notification)
+                }
+                .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
+                    updateKeyboardBottomInset(from: nil)
+                }
+            }
+        )
+    }
+
+    private func scrollFocusedTextBlock(to newID: UUID?, using proxy: ScrollViewProxy) {
+        guard !isLocked, let newID else { return }
+
+        DispatchQueue.main.async {
+            withAnimation(.easeOut(duration: 0.18)) {
+                proxy.scrollTo(newID, anchor: keyboardBottomInset > 0 ? .bottom : .center)
+            }
         }
-        .background(p.card.opacity(0.32))
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onAppear { ensureTextBlocksSeeded() }
-        .onChange(of: focusedTextBlockID) { _, newID in
-            if let newID { selectedTextBlockID = newID }
-        }
-        .onChange(of: textBlocks) { _, _ in
-            syncDraftTextFromBlocks()
-        }
+    }
+
+    private func textEditorBlocks() -> AnyView {
+        AnyView(
+            VStack(spacing: 10) {
+                ForEach(textBlocks.indices, id: \.self) { index in
+                    textBlockRow(block: $textBlocks[index])
+                        .id(textBlocks[index].id)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 18)
+            .padding(.bottom, keyboardBottomInset + 18)
+        )
     }
 
     private var textQuickActionsBar: some View {
@@ -2039,7 +2291,7 @@ struct NoteEditorScreen: View {
             }
             .padding(.horizontal, 10)
             .frame(height: 34)
-            .background(selected ? p.accent.opacity(0.62) : p.railButton)
+            .background(selected ? selectedTextActionFill : p.railButton)
             .clipShape(RoundedRectangle(cornerRadius: 10))
             .overlay(
                 RoundedRectangle(cornerRadius: 10)
@@ -2064,7 +2316,6 @@ struct NoteEditorScreen: View {
     @ViewBuilder
     private func textBlockRow(block: Binding<PLTextBlock>) -> some View {
         let p = theme.palette
-        let isSelected = selectedTextBlockID == block.wrappedValue.id
         let kind = block.wrappedValue.kind
 
         switch kind {
@@ -2088,12 +2339,11 @@ struct NoteEditorScreen: View {
             }
             .padding(.vertical, 10)
             .padding(.horizontal, 8)
-            .background(isSelected ? p.accent.opacity(0.15) : Color.clear)
             .clipShape(RoundedRectangle(cornerRadius: 10))
             .onTapGesture { selectedTextBlockID = block.wrappedValue.id }
 
         case .checklist:
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
+            HStack(alignment: .top, spacing: 10) {
                 Button {
                     toggleChecklist(id: block.wrappedValue.id)
                 } label: {
@@ -2103,6 +2353,7 @@ struct NoteEditorScreen: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(block.wrappedValue.checked ? p.accent : p.textSecondary)
+                .padding(.top, 3)
 
                 if isLocked {
                     Text(block.wrappedValue.text.isEmpty ? " " : block.wrappedValue.text)
@@ -2110,21 +2361,29 @@ struct NoteEditorScreen: View {
                         .foregroundStyle(p.textPrimary.opacity(block.wrappedValue.checked ? 0.58 : 0.92))
                         .strikethrough(block.wrappedValue.checked, color: p.textSecondary.opacity(0.7))
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
                 } else {
                     TextField("List item", text: block.text, axis: .vertical)
                         .font(.system(size: textFontSize, weight: .regular))
                         .textFieldStyle(.plain)
+                        .tint(editorTint)
                         .focused($focusedTextBlockID, equals: block.wrappedValue.id)
-                        .onTapGesture { selectedTextBlockID = block.wrappedValue.id }
+                        .lineLimit(1...4)
+                        .fixedSize(horizontal: false, vertical: true)
                         .submitLabel(.return)
                         .onSubmit {
                             insertTextBlock(kind: .body, after: block.wrappedValue.id)
                         }
+                        .simultaneousGesture(
+                            TapGesture().onEnded {
+                                selectedTextBlockID = block.wrappedValue.id
+                                focusedTextBlockID = block.wrappedValue.id
+                            }
+                        )
                 }
             }
             .padding(.vertical, 6)
             .padding(.horizontal, 8)
-            .background(isSelected ? p.accent.opacity(0.15) : Color.clear)
             .clipShape(RoundedRectangle(cornerRadius: 10))
 
         case .heading, .body:
@@ -2137,9 +2396,9 @@ struct NoteEditorScreen: View {
                     )
                     .foregroundStyle(p.textPrimary.opacity(kind == .heading ? 0.98 : 0.92))
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
                     .padding(.vertical, kind == .heading ? 8 : 4)
                     .padding(.horizontal, 8)
-                    .background(isSelected ? p.accent.opacity(0.15) : Color.clear)
                     .clipShape(RoundedRectangle(cornerRadius: 10))
                     .onTapGesture { selectedTextBlockID = block.wrappedValue.id }
             } else {
@@ -2150,15 +2409,22 @@ struct NoteEditorScreen: View {
                         : .system(size: textFontSize, weight: .regular)
                     )
                     .textFieldStyle(.plain)
+                    .tint(editorTint)
                     .focused($focusedTextBlockID, equals: block.wrappedValue.id)
-                    .onTapGesture { selectedTextBlockID = block.wrappedValue.id }
+                    .lineLimit(kind == .heading ? 1...3 : 1...8)
+                    .fixedSize(horizontal: false, vertical: true)
                     .submitLabel(.return)
                     .onSubmit {
                         insertTextBlock(kind: .body, after: block.wrappedValue.id)
                     }
+                    .simultaneousGesture(
+                        TapGesture().onEnded {
+                            selectedTextBlockID = block.wrappedValue.id
+                            focusedTextBlockID = block.wrappedValue.id
+                        }
+                    )
                     .padding(.vertical, kind == .heading ? 8 : 4)
                     .padding(.horizontal, 8)
-                    .background(isSelected ? p.accent.opacity(0.15) : Color.clear)
                     .clipShape(RoundedRectangle(cornerRadius: 10))
             }
         }
@@ -2176,6 +2442,32 @@ struct NoteEditorScreen: View {
         if selectedTextBlockID == nil {
             selectedTextBlockID = textBlocks.first?.id
         }
+        if (newlyCreated || isDraft), !isLocked, focusedTextBlockID == nil {
+            DispatchQueue.main.async {
+                self.focusedTextBlockID = self.textBlocks.first?.id
+            }
+        }
+    }
+
+    private func updateKeyboardBottomInset(from notification: Notification?) {
+#if canImport(UIKit)
+        guard let notification,
+              let frameValue = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else {
+            keyboardBottomInset = 0
+            return
+        }
+
+        let screenBounds = UIScreen.main.bounds
+        guard frameValue.maxY >= screenBounds.maxY - 1 else {
+            keyboardBottomInset = 0
+            return
+        }
+
+        let overlap = max(0, screenBounds.maxY - frameValue.minY)
+        keyboardBottomInset = overlap
+#else
+        keyboardBottomInset = 0
+#endif
     }
 
     private func selectedTextBlockIndex() -> Int? {
@@ -2328,6 +2620,11 @@ struct NoteEditorScreen: View {
                 resetViewportToken: zoomResetToken,
                 onZoomingChanged: { zooming in
                     if isZooming != zooming { isZooming = zooming }
+                },
+                onCanvasTap: {
+                    if currentKind != .text {
+                        plDismissActiveTextInput()
+                    }
                 }
             )
             .frame(width: geo.size.width, height: geo.size.height)
@@ -2347,6 +2644,11 @@ struct NoteEditorScreen: View {
                 resetViewportToken: zoomResetToken,
                 onZoomingChanged: { zooming in
                     if isZooming != zooming { isZooming = zooming }
+                },
+                onCanvasTap: {
+                    if currentKind != .text {
+                        plDismissActiveTextInput()
+                    }
                 }
             )
             .frame(width: geo.size.width, height: geo.size.height)
@@ -2588,6 +2890,7 @@ struct NoteEditorScreen: View {
 
         inkUndoStack.append(lastInkData)
         if inkUndoStack.count > 40 { inkUndoStack.removeFirst(inkUndoStack.count - 40) }
+        inkRedoStack.removeAll(keepingCapacity: true)
         lastInkData = newValue
     }
 
@@ -2597,6 +2900,7 @@ struct NoteEditorScreen: View {
 
         highlightUndoStack.append(lastHighlightData)
         if highlightUndoStack.count > 40 { highlightUndoStack.removeFirst(highlightUndoStack.count - 40) }
+        highlightRedoStack.removeAll(keepingCapacity: true)
         lastHighlightData = newValue
     }
 
@@ -2672,7 +2976,7 @@ struct NoteEditorScreen: View {
             }
             if let f = note.inkDrawingFilename,
                let d = FileStore.shared.readData(filename: f),
-               !d.isEmpty { inkData = d }
+               !d.isEmpty { applyInkDataProgrammatically(d) }
         }
 
         if note.kind == .photo {
@@ -2693,8 +2997,8 @@ struct NoteEditorScreen: View {
                 PaperLinkSyncManager.shared.enqueueNote(note, ctx: ctx)
             }
 
-            if let f = note.inkDrawingFilename, let d = FileStore.shared.readData(filename: f), !d.isEmpty { inkData = d }
-            if let f = note.highlightDrawingFilename, let d = FileStore.shared.readData(filename: f), !d.isEmpty { highlightData = d }
+            if let f = note.inkDrawingFilename, let d = FileStore.shared.readData(filename: f), !d.isEmpty { applyInkDataProgrammatically(d) }
+            if let f = note.highlightDrawingFilename, let d = FileStore.shared.readData(filename: f), !d.isEmpty { applyHighlightDataProgrammatically(d) }
         }
     }
 
@@ -2797,9 +3101,12 @@ private struct FloatingDrawingPalette: View {
     @Binding var markerWidth: Double
     @Binding var drawWithFinger: Bool
     @Binding var autoMinimize: Bool
+    let canUndo: Bool
+    let canRedo: Bool
 
     let onSelectTool: (PLDrawTool) -> Void
     let onUndo: () -> Void
+    let onRedo: () -> Void
     let onActivity: () -> Void
 
     @State private var dragOriginCenter: CGPoint? = nil
@@ -2964,18 +3271,12 @@ private struct FloatingDrawingPalette: View {
         Binding(
             get: { customColor },
             set: { newValue in
-                dismissActiveTextInput()
+                plDismissActiveTextInput()
                 customColor = newValue
                 selectedColor = .rainbow
                 onActivity()
             }
         )
-    }
-
-    private func dismissActiveTextInput() {
-#if canImport(UIKit)
-        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
-#endif
     }
 
     private func sanitizePalettePosition() {
@@ -3061,14 +3362,20 @@ private struct FloatingDrawingPalette: View {
     private var horizontalPaletteContent: some View {
         VStack(spacing: 12) {
             HStack(spacing: 10) {
-                paletteCircleButton(systemName: "arrow.uturn.backward", enabled: true) {
-                    dismissActiveTextInput()
+                paletteCircleButton(systemName: "arrow.uturn.backward", enabled: canUndo) {
+                    plDismissActiveTextInput()
                     onUndo()
                 }
                 .opacity(0.8)
 
+                paletteCircleButton(systemName: "arrow.uturn.forward", enabled: canRedo) {
+                    plDismissActiveTextInput()
+                    onRedo()
+                }
+                .opacity(0.8)
+
                 paletteCircleButton(systemName: "ellipsis", enabled: true) {
-                    dismissActiveTextInput()
+                    plDismissActiveTextInput()
                     showSettings = true
                 }
                 .popover(isPresented: $showSettings) {
@@ -3076,7 +3383,7 @@ private struct FloatingDrawingPalette: View {
                 }
 
                 paletteCircleButton(systemName: "chevron.down", enabled: true) {
-                    dismissActiveTextInput()
+                    plDismissActiveTextInput()
                     withAnimation(.interactiveSpring(response: 0.28, dampingFraction: 0.88)) {
                         isExpanded = false
                     }
@@ -3110,14 +3417,20 @@ private struct FloatingDrawingPalette: View {
     private var verticalPaletteContent: some View {
         VStack(spacing: 12) {
             HStack(spacing: 10) {
-                paletteCircleButton(systemName: "arrow.uturn.backward", enabled: true) {
-                    dismissActiveTextInput()
+                paletteCircleButton(systemName: "arrow.uturn.backward", enabled: canUndo) {
+                    plDismissActiveTextInput()
                     onUndo()
                 }
                 .opacity(0.8)
 
+                paletteCircleButton(systemName: "arrow.uturn.forward", enabled: canRedo) {
+                    plDismissActiveTextInput()
+                    onRedo()
+                }
+                .opacity(0.8)
+
                 paletteCircleButton(systemName: "ellipsis", enabled: true) {
-                    dismissActiveTextInput()
+                    plDismissActiveTextInput()
                     showSettings = true
                 }
                 .popover(isPresented: $showSettings) {
@@ -3125,7 +3438,7 @@ private struct FloatingDrawingPalette: View {
                 }
 
                 paletteCircleButton(systemName: "chevron.down", enabled: true) {
-                    dismissActiveTextInput()
+                    plDismissActiveTextInput()
                     withAnimation(.interactiveSpring(response: 0.28, dampingFraction: 0.88)) {
                         isExpanded = false
                     }
@@ -3157,7 +3470,7 @@ private struct FloatingDrawingPalette: View {
 
     private var minimizedPalette: some View {
         Button {
-            dismissActiveTextInput()
+            plDismissActiveTextInput()
             withAnimation(.spring(response: 0.28, dampingFraction: 0.88)) {
                 isExpanded = true
             }
@@ -3264,7 +3577,7 @@ private struct FloatingDrawingPalette: View {
 
     private func paletteCircleButton(systemName: String, enabled: Bool, action: @escaping () -> Void) -> some View {
         Button(action: {
-            dismissActiveTextInput()
+            plDismissActiveTextInput()
             action()
             onActivity()
         }) {
@@ -3348,7 +3661,7 @@ private struct FloatingDrawingPalette: View {
 
     private var customColorButton: some View {
         Button {
-            dismissActiveTextInput()
+            plDismissActiveTextInput()
             selectedColor = .rainbow
             showCustomColorPopover = true
             onActivity()
@@ -3683,7 +3996,9 @@ private struct PropertiesSheetLite: View {
 
                             Text("Aa")
                                 .font(.system(size: preset.value, weight: .regular))
+                                .frame(width: 48, alignment: .trailing)
                                 .lineLimit(1)
+                                .minimumScaleFactor(0.7)
                         }
                         .foregroundStyle(selectedPreset.id == preset.id ? p.background : p.textPrimary)
                         .padding(.horizontal, 12)
